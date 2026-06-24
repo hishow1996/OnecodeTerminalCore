@@ -115,19 +115,6 @@ class TerminalManager private constructor(
         private const val MAX_OUTPUT_LINES_PER_ITEM = 1000
     }
 
-    init {
-        // 在初始化时异步创建默认session
-        coroutineScope.launch {
-            try {
-                Log.d(TAG, "Creating default session...")
-                createNewSession("default")
-                Log.d(TAG, "Default session created successfully")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create default session", e)
-            }
-        }
-    }
-
     /**
      * 创建新会话 - 同步等待初始化完成
      */
