@@ -74,6 +74,10 @@ class CanvasTerminalView @JvmOverloads constructor(
     private val renderCondition = renderLock.newCondition()
     private var isDirty = true // 是否需要重绘
     
+    // 光标闪烁状态
+    @Volatile
+    private var cursorBlinkOn = true
+    
     // 手势处理
     private lateinit var gestureHandler: GestureHandler
     private val selectionManager = TextSelectionManager()
@@ -161,6 +165,7 @@ class CanvasTerminalView @JvmOverloads constructor(
         
         // 添加新的监听器
         emulatorChangeListener = {
+            cursorBlinkOn = true // 有新输出时光标立即可见
             isDirty = true
             requestRender()
         }
@@ -310,11 +315,19 @@ class CanvasTerminalView @JvmOverloads constructor(
         
         override fun run() {
             var lastFrameTime = System.currentTimeMillis()
+            var lastBlinkTime = System.currentTimeMillis()
             val targetFrameTime = 1000L / config.targetFps
             
             while (running) {
                 val currentTime = System.currentTimeMillis()
                 val deltaTime = currentTime - lastFrameTime
+                
+                // 光标闪烁逻辑：每隔 cursorBlinkRate 毫秒切换光标可见性
+                if (config.cursorBlinkRate > 0 && currentTime - lastBlinkTime >= config.cursorBlinkRate) {
+                    cursorBlinkOn = !cursorBlinkOn
+                    lastBlinkTime = currentTime
+                    isDirty = true // 触发重绘
+                }
                 
                 // 如果没有变化且距离上次渲染时间较短，则跳过渲染（省电）
                 if (!isDirty && deltaTime < targetFrameTime) {
@@ -396,8 +409,8 @@ class CanvasTerminalView @JvmOverloads constructor(
             drawSelection(canvas, charWidth, charHeight)
         }
         
-        // 绘制光标
-        if (emulator?.isCursorVisible() == true) {
+        // 绘制光标（受闪烁状态控制）
+        if (emulator?.isCursorVisible() == true && cursorBlinkOn) {
             drawCursor(canvas, charWidth, charHeight)
         }
     }

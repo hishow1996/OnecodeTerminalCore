@@ -240,8 +240,12 @@ class OutputProcessor(
                 session.copy(initState = SessionInitState.READY)
             }
             
-            // 发送欢迎语到 Canvas
+            // 先发送欢迎语到 Canvas（包含清屏，会清除之前的初始化输出）
             sendWelcomeMessage(sessionId, sessionManager)
+            
+            // 再将首个提示符写入 ANSI 解析器，确保画布在欢迎语之后显示提示符
+            // 注意：必须在 sendWelcomeMessage 之后执行，否则欢迎语的清屏会擦除提示符
+            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
         }
     }
 
