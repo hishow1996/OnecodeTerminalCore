@@ -119,27 +119,7 @@ class TerminalManager private constructor(
         private const val MAX_OUTPUT_LINES_PER_ITEM = 1000
     }
 
-    init {
-        // 在初始化时异步创建默认session
-        coroutineScope.launch {
-            try {
-                Log.d(TAG, "Creating default session...")
-                // 自动检测：如果有SSH配置则创建SSH会话，否则创建本地会话
-                val sshConfig = sshConfigManager.getConfig()
-                val isEnabled = sshConfigManager.isEnabled()
-                if (sshConfig != null && isEnabled) {
-                    Log.d(TAG, "Found SSH config, creating SSH session")
-                    createNewSession("SSH")
-                } else {
-                    Log.d(TAG, "No SSH config, creating local session")
-                    createNewSession("Local")
-                }
-                Log.d(TAG, "Default session created successfully")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create default session", e)
-            }
-        }
-    }
+
 
     /**
      * 创建新会话 - 同步等待初始化完成
@@ -800,6 +780,7 @@ class TerminalManager private constructor(
 
               mkdir -p "${'$'}TMP_DIR/root" 2>/dev/null
               echo 'export ANDROID_DATA=/home/' >> "${'$'}TMP_DIR/root/.bashrc"
+              echo 'export PS1="root@localhost:~# "' >> "${'$'}TMP_DIR/root/.bashrc"
               mkdir -p "${'$'}TMP_DIR/etc" 2>/dev/null
               echo 'nameserver 8.8.8.8' > "${'$'}TMP_DIR/etc/resolv.conf"
               echo "ok" > "${'$'}TMP_DIR/.operit_installed_ok" 2>/dev/null || true

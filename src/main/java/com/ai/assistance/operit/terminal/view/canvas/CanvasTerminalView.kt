@@ -94,6 +94,11 @@ class CanvasTerminalView @JvmOverloads constructor(
     private val renderCondition = renderLock.newCondition()
     private var isDirty = true // 是否需要重绘
     
+    // 光标闪烁
+    private var cursorBlinkOn = true
+    private val cursorBlinkRate = 500L
+    private var lastCursorBlinkTime = 0L
+    
     // 手势处理
     private lateinit var gestureHandler: GestureHandler
     private val selectionManager = TextSelectionManager()
@@ -307,6 +312,8 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 添加新的监听器
         emulatorChangeListener = {
             isDirty = true
+            cursorBlinkOn = true
+            lastCursorBlinkTime = System.currentTimeMillis()
             requestRender()
             // 通知无障碍服务内容已更新
             // 直接使用成员变量以兼容 API < 29 (getAccessibilityDelegate 是 API 29+)
@@ -706,6 +713,13 @@ class CanvasTerminalView @JvmOverloads constructor(
                     val currentTime = System.currentTimeMillis()
                     val timeSinceLastRender = currentTime - lastRenderTime
                     
+                    // 光标闪烁
+                    if (currentTime - lastCursorBlinkTime >= cursorBlinkRate) {
+                        cursorBlinkOn = !cursorBlinkOn
+                        lastCursorBlinkTime = currentTime
+                        isDirty = true
+                    }
+                    
                     // 未到渲染时间且无脏数据：短暂休眠
                     if (!isDirty && timeSinceLastRender < targetFrameTime) {
                         sleep(5)
@@ -834,7 +848,7 @@ class CanvasTerminalView @JvmOverloads constructor(
         }
         
         // 绘制光标（光标只在可见屏幕部分显示，需要考虑历史缓冲区偏移）
-        if (em.isCursorVisible()) {
+        if (em.isCursorVisible() && cursorBlinkOn) {
             val cursorRow = historySize + em.getCursorY()
             val cursorCol = em.getCursorX()
             

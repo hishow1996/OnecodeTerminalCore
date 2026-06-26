@@ -250,6 +250,9 @@ class OutputProcessor(
             
             // 发送欢迎语到 Canvas
             sendWelcomeMessage(sessionId, sessionManager)
+            
+            // 重新发送当前 prompt 行（清屏操作会清除 prompt）
+            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
         } else {
             Log.d(TAG, "Not a prompt, continuing to wait...")
         }
