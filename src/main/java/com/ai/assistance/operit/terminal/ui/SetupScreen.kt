@@ -165,9 +165,14 @@ fun SetupScreen(
 
         onDispose {
             job.cancel()
-            checkSessionId?.let {
-                Log.d("SetupScreen", "Closing check session $it")
-                terminalManager.closeSession(it)
+            checkSessionId?.let { sid ->
+                val state = terminalManager.terminalState.value
+                val otherSession = state.sessions.firstOrNull { it.id != sid }
+                if (otherSession != null && state.currentSessionId == sid) {
+                    terminalManager.switchToSession(otherSession.id)
+                }
+                Log.d("SetupScreen", "Closing check session $sid")
+                terminalManager.closeSession(sid)
             }
         }
     }
@@ -220,9 +225,14 @@ fun SetupScreen(
                         showSetupDialog = false
                         // 在开始设置前，显式关闭检查会话
                         checkSessionId?.let { sid ->
+                            val state = terminalManager.terminalState.value
+                            val otherSession = state.sessions.firstOrNull { it.id != sid }
+                            if (otherSession != null && state.currentSessionId == sid) {
+                                terminalManager.switchToSession(otherSession.id)
+                            }
                             Log.d("SetupScreen", "Closing check session $sid before starting setup.")
                             terminalManager.closeSession(sid)
-                            checkSessionId = null // 防止 onDispose 重复关闭
+                            checkSessionId = null
                         }
                         onSetup(commandsToRun.value)
                     },
@@ -696,8 +706,7 @@ private suspend fun executeCommandAndGetOutput(
     }
 
     collectorReady.await()
-    terminalManager.switchToSession(sessionId)
-    terminalManager.sendCommand(command, commandId)
+    terminalManager.sendCommandToSession(sessionId, command, commandId)
 
     val result = withTimeoutOrNull(15000L) { // 15s timeout
         deferred.await()
