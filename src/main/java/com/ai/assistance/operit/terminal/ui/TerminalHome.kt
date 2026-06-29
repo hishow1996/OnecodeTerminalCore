@@ -348,7 +348,31 @@ fun TerminalHome(
                 }
             }
         }
+    } // end Column
+
+    // 初始化遮罩：会话未就绪时覆盖终端区域，避免闪现未清理的原始输出
+    if (isCurrentSessionInitializing) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                CircularProgressIndicator(color = Color.White)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Initializing...",
+                    color = Color.White,
+                    fontSize = 16.sp
+                )
+            }
+        }
     }
+    } // end Box
 
     // 删除确认弹窗
     if (showDeleteConfirmDialog && sessionToDelete != null) {
@@ -406,31 +430,6 @@ fun TerminalHome(
             textContentColor = Color.Gray
         )
     }
-    } // end Column
-
-    // 初始化遮罩：会话未就绪时覆盖终端区域，避免闪现未清理的原始输出
-    if (isCurrentSessionInitializing) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                CircularProgressIndicator(color = Color.White)
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Initializing...",
-                    color = Color.White,
-                    fontSize = 16.sp
-                )
-            }
-        }
-    }
-    } // end Box
 }
 
 private fun getTruncatedPrompt(prompt: String, maxLength: Int = 16): String {
