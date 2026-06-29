@@ -150,20 +150,14 @@ fun TerminalHome(
     val padding = basePadding * scaleFactor
 
     // 获取当前 session 的 PTY
-    val currentSession = remember(env.currentSessionId, env.sessions) {
-        env.sessions.find { it.id == env.currentSessionId }
+    val currentPty = remember(env.currentSessionId, env.sessions) {
+        env.sessions.find { it.id == env.currentSessionId }?.pty
     }
-    val currentPty = currentSession?.pty
-    val isCurrentSessionInitializing = currentSession?.isInitializing != false
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(Color.Black)
     ) {
         // 会话标签页
         SessionTabBar(
@@ -348,31 +342,7 @@ fun TerminalHome(
                 }
             }
         }
-    } // end Column
-
-    // 初始化遮罩：会话未就绪时覆盖终端区域，避免闪现未清理的原始输出
-    if (isCurrentSessionInitializing) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                CircularProgressIndicator(color = Color.White)
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Initializing...",
-                    color = Color.White,
-                    fontSize = 16.sp
-                )
-            }
-        }
     }
-    } // end Box
 
     // 删除确认弹窗
     if (showDeleteConfirmDialog && sessionToDelete != null) {
