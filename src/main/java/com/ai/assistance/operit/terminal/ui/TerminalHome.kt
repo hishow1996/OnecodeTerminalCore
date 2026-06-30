@@ -834,13 +834,13 @@ private fun DirectInputCompactBar(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
-                KeyButton("Ctrl+C", "\u0003", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("PGDN", "\u001b[6~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
+                KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("Ctrl+C", "\u0003", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
+                KeyButton("Enter", "\r", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("PGUP", "\u001b[5~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 Surface(
                     modifier = Modifier
                         .weight(1f)
@@ -870,13 +870,13 @@ private fun DirectInputCompactBar(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
-                KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("Enter", "\r", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
+                ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
                 KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("PGUP", "\u001b[5~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↓", "\u001b[B", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("→", "\u001b[C", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("PGDN", "\u001b[6~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 Surface(
                     modifier = Modifier
                         .weight(1f)
