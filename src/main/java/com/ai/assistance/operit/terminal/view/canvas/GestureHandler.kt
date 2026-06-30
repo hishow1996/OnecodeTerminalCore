@@ -99,6 +99,8 @@ class GestureHandler(
  * 文本选择管理器
  */
 class TextSelectionManager {
+    enum class DragHandle { NONE, START, END }
+    
     data class Selection(
         val startRow: Int,
         val startCol: Int,
@@ -128,6 +130,8 @@ class TextSelectionManager {
     var selection: Selection? = null
         private set
     
+    var activeDragHandle = DragHandle.NONE
+    
     private var selectionStart: Pair<Int, Int>? = null
     
     fun startSelection(row: Int, col: Int) {
@@ -141,9 +145,27 @@ class TextSelectionManager {
         }
     }
     
+    fun updateStartSelection(row: Int, col: Int) {
+        selection?.let { sel ->
+            selection = Selection(row, col, sel.endRow, sel.endCol)
+        }
+    }
+    
+    fun updateEndSelection(row: Int, col: Int) {
+        selection?.let { sel ->
+            selection = Selection(sel.startRow, sel.startCol, row, col)
+        }
+    }
+    
+    fun setSelection(startRow: Int, startCol: Int, endRow: Int, endCol: Int) {
+        selection = Selection(startRow, startCol, endRow, endCol)
+        selectionStart = Pair(startRow, startCol)
+    }
+    
     fun clearSelection() {
         selection = null
         selectionStart = null
+        activeDragHandle = DragHandle.NONE
     }
     
     fun hasSelection(): Boolean = selection != null

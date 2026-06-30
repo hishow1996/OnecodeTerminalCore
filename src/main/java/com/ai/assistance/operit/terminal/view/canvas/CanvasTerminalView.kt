@@ -66,8 +66,21 @@ class CanvasTerminalView @JvmOverloads constructor(
     }
     
     private val selectionPaint = Paint().apply {
-        color = Color.argb(100, 100, 149, 237) // 半透明蓝色
+        color = Color.argb(100, 100, 149, 237)
         style = Paint.Style.FILL
+    }
+    
+    private val handlePaint = Paint().apply {
+        color = Color.rgb(100, 149, 237)
+        style = Paint.Style.FILL
+        isAntiAlias = true
+    }
+    
+    private val handleStrokePaint = Paint().apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        isAntiAlias = true
     }
     
     // 文本测量工具
@@ -1081,9 +1094,6 @@ class CanvasTerminalView @JvmOverloads constructor(
         val selection = selectionManager.selection?.normalize() ?: return
         val em = emulator ?: return
         val fullContent = em.getFullContent()
-        val historySize = em.getHistorySize()
-        
-        val startRow = (scrollOffsetY / charHeight).toInt()
         
         for (row in selection.startRow..selection.endRow) {
             val exactY = row * charHeight - scrollOffsetY
@@ -1096,18 +1106,15 @@ class CanvasTerminalView @JvmOverloads constructor(
                 fullContent.getOrNull(row)?.size ?: 0
             }
             
-            // 计算选择区域的 x 坐标，考虑宽字符
             val line = fullContent.getOrNull(row) ?: continue
             var x1 = 0f
             var x2 = 0f
             
-            // 计算起始 x 坐标
             for (col in 0 until startCol.coerceAtMost(line.size)) {
                 val cellWidth = textMetrics.getCellWidth(line[col].char)
                 x1 += charWidth * cellWidth
             }
             
-            // 计算结束 x 坐标
             for (col in 0..endCol.coerceAtMost(line.size - 1)) {
                 val cellWidth = textMetrics.getCellWidth(line[col].char)
                 x2 += charWidth * cellWidth
@@ -1115,6 +1122,81 @@ class CanvasTerminalView @JvmOverloads constructor(
             
             canvas.drawRect(x1, y, x2, y + charHeight, selectionPaint)
         }
+        
+        val handleRadius = charHeight * 0.4f
+        val handleLineHeight = charHeight * 0.6f
+        
+        val startLine = fullContent.getOrNull(selection.startRow) ?: return
+        var startX = 0f
+        for (col in 0 until selection.startCol.coerceAtMost(startLine.size)) {
+            val cellWidth = textMetrics.getCellWidth(startLine[col].char)
+            startX += charWidth * cellWidth
+        }
+        val startY = selection.startRow * charHeight - scrollOffsetY
+        canvas.drawRect(startX - handleRadius / 2, startY, startX + handleRadius / 2, startY + handleLineHeight, handlePaint)
+        canvas.drawCircle(startX, startY + handleLineHeight + handleRadius, handleRadius, handlePaint)
+        canvas.drawCircle(startX, startY + handleLineHeight + handleRadius, handleRadius, handleStrokePaint)
+        
+        val endLine = fullContent.getOrNull(selection.endRow) ?: return
+        var endX = 0f
+        for (col in 0..selection.endCol.coerceAtMost(endLine.size - 1)) {
+            val cellWidth = textMetrics.getCellWidth(endLine[col].char)
+            endX += charWidth * cellWidth
+        }
+        val endY = selection.endRow * charHeight - scrollOffsetY + charHeight
+        canvas.drawRect(endX - handleRadius / 2, endY - handleLineHeight, endX + handleRadius / 2, endY, handlePaint)
+        canvas.drawCircle(endX, endY - handleLineHeight - handleRadius, handleRadius, handlePaint)
+        canvas.drawCircle(endX, endY - handleLineHeight - handleRadius, handleRadius, handleStrokePaint)
+    }
+    
+    private fun getHandlePositions(): Pair<Pair<Float, Float>, Pair<Float, Float>>? {
+        val selection = selectionManager.selection?.normalize() ?: return null
+        val em = emulator ?: return null
+        val fullContent = em.getFullContent()
+        val charWidth = textMetrics.charWidth
+        val charHeight = textMetrics.charHeight
+        val handleRadius = charHeight * 0.4f
+        val handleLineHeight = charHeight * 0.6f
+        
+        val startLine = fullContent.getOrNull(selection.startRow) ?: return null
+        var startX = 0f
+        for (col in 0 until selection.startCol.coerceAtMost(startLine.size)) {
+            val cellWidth = textMetrics.getCellWidth(startLine[col].char)
+            startX += charWidth * cellWidth
+        }
+        val startY = selection.startRow * charHeight - scrollOffsetY + handleLineHeight + handleRadius
+        
+        val endLine = fullContent.getOrNull(selection.endRow) ?: return null
+        var endX = 0f
+        for (col in 0..selection.endCol.coerceAtMost(endLine.size - 1)) {
+            val cellWidth = textMetrics.getCellWidth(endLine[col].char)
+            endX += charWidth * cellWidth
+        }
+        val endY = selection.endRow * charHeight - scrollOffsetY + charHeight - handleLineHeight - handleRadius
+        
+        return Pair(Pair(startX, startY), Pair(endX, endY))
+    }
+    
+    private fun hitTestHandle(x: Float, y: Float): TextSelectionManager.DragHandle {
+        val positions = getHandlePositions() ?: return TextSelectionManager.DragHandle.NONE
+        val charHeight = textMetrics.charHeight
+        val hitRadius = charHeight * 1.2f
+        
+        val (startPos, endPos) = positions
+        
+        val dxStart = x - startPos.first
+        val dyStart = y - startPos.second
+        if (dxStart * dxStart + dyStart * dyStart < hitRadius * hitRadius) {
+            return TextSelectionManager.DragHandle.START
+        }
+        
+        val dxEnd = x - endPos.first
+        val dyEnd = y - endPos.second
+        if (dxEnd * dxEnd + dyEnd * dyEnd < hitRadius * hitRadius) {
+            return TextSelectionManager.DragHandle.END
+        }
+        
+        return TextSelectionManager.DragHandle.NONE
     }
     
     // === 无障碍支持 ===
@@ -1187,15 +1269,26 @@ class CanvasTerminalView @JvmOverloads constructor(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val handled = gestureHandler.onTouchEvent(event)
         
-        // 单击时请求焦点并显示输入法（全屏模式下）
         if (event.action == MotionEvent.ACTION_DOWN) {
             if (!hasFocus()) {
                 requestFocus()
             }
             if (selectionManager.hasSelection()) {
+                val handle = hitTestHandle(event.x, event.y)
+                if (handle != TextSelectionManager.DragHandle.NONE) {
+                    selectionManager.activeDragHandle = handle
+                    return true
+                }
                 actionMode?.finish()
                 selectionManager.clearSelection()
                 requestRender()
+                if (isFullscreenMode) {
+                    postDelayed({
+                        showSoftKeyboard()
+                    }, 100)
+                } else {
+                    onRequestShowKeyboard?.invoke()
+                }
                 return handled || super.onTouchEvent(event)
             }
             if (isFullscreenMode) {
@@ -1207,15 +1300,31 @@ class CanvasTerminalView @JvmOverloads constructor(
             }
         }
         
-        // 处理选择移动
         if (selectionManager.hasSelection() && event.action == MotionEvent.ACTION_MOVE) {
             val (row, col) = screenToTerminalCoords(event.x, event.y)
-            selectionManager.updateSelection(row, col)
+            when (selectionManager.activeDragHandle) {
+                TextSelectionManager.DragHandle.START -> {
+                    selectionManager.updateStartSelection(row, col)
+                }
+                TextSelectionManager.DragHandle.END -> {
+                    selectionManager.updateEndSelection(row, col)
+                }
+                else -> {
+                    selectionManager.updateSelection(row, col)
+                }
+            }
             requestRender()
         }
         
-        if (event.action == MotionEvent.ACTION_UP && selectionManager.hasSelection()) {
-            showTextSelectionMenu()
+        if (event.action == MotionEvent.ACTION_UP) {
+            if (selectionManager.activeDragHandle != TextSelectionManager.DragHandle.NONE) {
+                selectionManager.activeDragHandle = TextSelectionManager.DragHandle.NONE
+                if (selectionManager.hasSelection()) {
+                    showTextSelectionMenu()
+                }
+            } else if (selectionManager.hasSelection()) {
+                showTextSelectionMenu()
+            }
         }
         
         return handled || super.onTouchEvent(event)
@@ -1264,7 +1373,28 @@ class CanvasTerminalView @JvmOverloads constructor(
      */
     private fun startTextSelection(x: Float, y: Float) {
         val (row, col) = screenToTerminalCoords(x, y)
-        selectionManager.startSelection(row, col)
+        val em = emulator ?: return
+        val content = em.getFullContent()
+        val line = content.getOrNull(row) ?: return
+        
+        val isWordChar: (Char) -> Boolean = { c -> c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/' }
+        
+        var startCol = col
+        while (startCol > 0 && line.getOrNull(startCol - 1)?.char?.let(isWordChar) == true) {
+            startCol--
+        }
+        
+        var endCol = col
+        while (endCol < line.size - 1 && line.getOrNull(endCol + 1)?.char?.let(isWordChar) == true) {
+            endCol++
+        }
+        
+        if (startCol == endCol) {
+            startCol = (col - 1).coerceAtLeast(0)
+            endCol = (col + 1).coerceAtMost(line.size - 1)
+        }
+        
+        selectionManager.setSelection(row, startCol, row, endCol)
         requestRender()
     }
     

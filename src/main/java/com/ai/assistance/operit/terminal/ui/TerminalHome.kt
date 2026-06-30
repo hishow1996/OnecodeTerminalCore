@@ -52,6 +52,9 @@ import com.ai.assistance.operit.terminal.data.CommandHistoryItem
 import com.ai.assistance.operit.terminal.data.TerminalSessionData
 import com.ai.assistance.operit.terminal.view.canvas.CanvasTerminalOutput
 import com.ai.assistance.operit.terminal.view.canvas.CanvasTerminalScreen
+import com.ai.assistance.operit.terminal.view.canvas.CanvasTerminalView
+import android.view.MotionEvent
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.layout.WindowInsets
@@ -202,36 +205,52 @@ fun TerminalHome(
                     .fillMaxSize()
                     .imePadding()
             ) {
-                Box(
+                AndroidView(
+                    factory = { context ->
+                        CanvasTerminalView(context).apply {
+                            setConfig(fontConfig)
+                            setEmulator(env.terminalEmulator)
+                            setPty(currentPty)
+                            setSessionScrollCallbacks(env.currentSessionId, { id, offset -> env.saveScrollOffset(id, offset) }, { id -> env.getScrollOffset(id) })
+                            setFullscreenMode(false)
+                            setOnRequestShowKeyboard {
+                                inputFocusRequester.requestFocus()
+                                pendingShowIme = true
+                            }
+                            setOnTouchListener { v, event ->
+                                when (event.action) {
+                                    MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(true)
+                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.parent?.requestDisallowInterceptTouchEvent(false)
+                                }
+                                false
+                            }
+                        }
+                    },
+                    update = { view ->
+                        view.setConfig(fontConfig)
+                        view.setEmulator(env.terminalEmulator)
+                        view.setPty(currentPty)
+                        view.setSessionScrollCallbacks(env.currentSessionId, { id, offset -> env.saveScrollOffset(id, offset) }, { id -> env.getScrollOffset(id) })
+                        if (isDirectInputMode) {
+                            view.setFullscreenMode(true)
+                            view.setInputCallback { env.onSendInput(it, false) }
+                            view.setOnRequestShowKeyboard(null)
+                        } else {
+                            view.setFullscreenMode(false)
+                            view.setInputCallback { }
+                            view.setOnRequestShowKeyboard {
+                                inputFocusRequester.requestFocus()
+                                pendingShowIme = true
+                            }
+                        }
+                    },
+                    onRelease = { view ->
+                        view.stopRenderThread()
+                    },
                     modifier = Modifier
                         .weight(1f)
                         .background(Color.Black)
-                ) {
-                    if (isDirectInputMode) {
-                        CanvasTerminalScreen(
-                            emulator = env.terminalEmulator,
-                            config = fontConfig,
-                            pty = currentPty,
-                            onInput = { env.onSendInput(it, false) },
-                            sessionId = env.currentSessionId,
-                            onScrollOffsetChanged = { id, offset -> env.saveScrollOffset(id, offset) },
-                            getScrollOffset = { id -> env.getScrollOffset(id) }
-                        )
-                    } else {
-                        CanvasTerminalOutput(
-                            emulator = env.terminalEmulator,
-                            config = fontConfig,
-                            pty = currentPty,
-                            onRequestShowKeyboard = {
-                                inputFocusRequester.requestFocus()
-                                pendingShowIme = true
-                            },
-                            sessionId = env.currentSessionId,
-                            onScrollOffsetChanged = { id, offset -> env.saveScrollOffset(id, offset) },
-                            getScrollOffset = { id -> env.getScrollOffset(id) }
-                        )
-                    }
-                }
+                )
                 
                 // 终端工具栏
                 TerminalToolbar(
@@ -320,16 +339,10 @@ fun TerminalHome(
                                 if (isDirectInputMode) {
                                     showVirtualKeyboard = true
                                     env.onCommandChange("")
-                                    coroutineScope.launch {
-                                        delay(200)
-                                        keyboardController?.hide()
-                                    }
+                                    keyboardController?.hide()
                                 } else {
                                     showVirtualKeyboard = false
-                                    coroutineScope.launch {
-                                        delay(200)
-                                        keyboardController?.show()
-                                    }
+                                    keyboardController?.show()
                                 }
                             },
                         color = if (isDirectInputMode) Color(0xFF4A4A4A) else Color(0xFF3A3A3A),
