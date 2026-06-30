@@ -267,14 +267,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                 }
             },
             onDoubleTap = { x, y ->
-                // 双击选择单词（可选实现）
-                // 也可以用来切换输入法（仅全屏模式）
-                if (isFullscreenMode) {
-                    if (!hasFocus()) {
-                        requestFocus()
-                    }
-                    showSoftKeyboard()
-                }
+                selectWordAt(x, y)
             },
             onLongPress = { x, y ->
                 startTextSelection(x, y)
@@ -478,7 +471,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                 }
             },
             onDoubleTap = { x, y ->
-                // 双击选择单词（可选实现）
+                selectWordAt(x, y)
             },
             onLongPress = { x, y ->
                 startTextSelection(x, y)
@@ -1199,16 +1192,18 @@ class CanvasTerminalView @JvmOverloads constructor(
             if (!hasFocus()) {
                 requestFocus()
             }
-            if (!selectionManager.hasSelection()) {
-                if (isFullscreenMode) {
-                    // 全屏模式下，单击即显示输入法
-                    postDelayed({
-                        showSoftKeyboard()
-                    }, 100) // 延迟100ms确保焦点已获取
-                } else {
-                    // 非全屏模式下，交给上层决定如何显示输入法
-                    onRequestShowKeyboard?.invoke()
-                }
+            if (selectionManager.hasSelection()) {
+                actionMode?.finish()
+                selectionManager.clearSelection()
+                requestRender()
+                return handled || super.onTouchEvent(event)
+            }
+            if (isFullscreenMode) {
+                postDelayed({
+                    showSoftKeyboard()
+                }, 100)
+            } else {
+                onRequestShowKeyboard?.invoke()
             }
         }
         
@@ -1273,6 +1268,36 @@ class CanvasTerminalView @JvmOverloads constructor(
         requestRender()
     }
     
+    private fun selectWordAt(x: Float, y: Float) {
+        val (row, col) = screenToTerminalCoords(x, y)
+        val em = emulator ?: return
+        val content = em.getFullContent()
+        val line = content.getOrNull(row) ?: return
+        
+        val isWordChar: (Char) -> Boolean = { c -> c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/' }
+        
+        var startCol = col
+        while (startCol > 0 && line.getOrNull(startCol - 1)?.char?.let(isWordChar) == true) {
+            startCol--
+        }
+        
+        var endCol = col
+        while (endCol < line.size - 1 && line.getOrNull(endCol + 1)?.char?.let(isWordChar) == true) {
+            endCol++
+        }
+        
+        if (startCol == endCol && line.getOrNull(startCol)?.char?.let(isWordChar) != true) {
+            return
+        }
+        
+        selectionManager.startSelection(row, startCol)
+        selectionManager.updateSelection(row, endCol)
+        actionMode?.finish()
+        actionMode = null
+        showTextSelectionMenu()
+        requestRender()
+    }
+    
     /**
      * 显示文本选择菜单
      */
@@ -1281,7 +1306,9 @@ class CanvasTerminalView @JvmOverloads constructor(
         
         actionMode = startActionMode(object : ActionMode.Callback {
             override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                menu.add(0, 1, 0, "复制")
+                menu.add(0, 1, 0, android.R.string.selectAll)
+                menu.add(0, 2, 0, android.R.string.copy)
+                menu.add(0, 3, 0, "Paste")
                 return true
             }
             
@@ -1292,7 +1319,16 @@ class CanvasTerminalView @JvmOverloads constructor(
             override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
                 when (item.itemId) {
                     1 -> {
+                        selectAllText()
+                        return true
+                    }
+                    2 -> {
                         copySelectedText()
+                        mode.finish()
+                        return true
+                    }
+                    3 -> {
+                        pasteFromClipboard()
                         mode.finish()
                         return true
                     }
@@ -1305,7 +1341,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                 selectionManager.clearSelection()
                 requestRender()
             }
-        })
+        }, ActionMode.TYPE_FLOATING)
     }
     
     /**
@@ -1313,20 +1349,22 @@ class CanvasTerminalView @JvmOverloads constructor(
      */
     private fun copySelectedText() {
         val selection = selectionManager.selection?.normalize() ?: return
-        val buffer = emulator?.getScreenContent() ?: return
+        val content = emulator?.getFullContent() ?: return
         
         val text = buildString {
             for (row in selection.startRow..selection.endRow) {
-                if (row >= buffer.size) break
+                if (row >= content.size) break
                 
-                val line = buffer[row]
+                val line = content[row]
                 val startCol = if (row == selection.startRow) selection.startCol else 0
-                val endCol = if (row == selection.endRow) selection.endCol else line.size - 1
+                val endCol = if (row == selection.endRow) {
+                    selection.endCol
+                } else {
+                    line.size
+                }
                 
-                for (col in startCol..endCol) {
-                    if (col < line.size) {
-                        append(line[col].char)
-                    }
+                for (col in startCol..endCol.coerceAtMost(line.size - 1)) {
+                    append(line[col].char)
                 }
                 
                 if (row < selection.endRow) {
@@ -1337,6 +1375,25 @@ class CanvasTerminalView @JvmOverloads constructor(
         
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Terminal", text))
+    }
+    
+    private fun selectAllText() {
+        val content = emulator?.getFullContent() ?: return
+        if (content.isEmpty()) return
+        val lastRow = content.size - 1
+        val lastCol = (content[lastRow].size - 1).coerceAtLeast(0)
+        selectionManager.startSelection(0, 0)
+        selectionManager.updateSelection(lastRow, lastCol)
+        requestRender()
+    }
+    
+    private fun pasteFromClipboard() {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = clipboard.primaryClip ?: return
+        if (clip.itemCount > 0) {
+            val text = clip.getItemAt(0).text?.toString() ?: return
+            inputCallback?.invoke(text)
+        }
     }
     
     // === 输入法支持 ===
