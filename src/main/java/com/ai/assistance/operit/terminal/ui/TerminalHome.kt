@@ -117,6 +117,8 @@ fun TerminalHome(
     // 命令输入框焦点控制
     val inputFocusRequester = remember { FocusRequester() }
     var pendingShowIme by remember { mutableStateOf(false) }
+    var imeShown by remember { mutableStateOf(false) }
+    var terminalViewRef by remember { mutableStateOf<CanvasTerminalView?>(null) }
 
     LaunchedEffect(pendingShowIme) {
         if (pendingShowIme) {
@@ -141,8 +143,6 @@ fun TerminalHome(
     // 非全屏模式下虚拟键盘显示状态
     var showVirtualKeyboard by remember { mutableStateOf(false) }
     var isDirectInputMode by remember { mutableStateOf(false) }
-    var imeShown by remember { mutableStateOf(false) }
-    var terminalViewRef by remember { mutableStateOf<CanvasTerminalView?>(null) }
 
     // 计算基于缩放因子的字体大小和间距
     val baseFontSize = 14.sp
