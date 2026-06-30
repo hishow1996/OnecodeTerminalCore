@@ -354,9 +354,9 @@ fun SetupScreen(
                 onClick = {
                     val commands = mutableListOf<String>()
                     
-                    // 系统修复（串行）
-                    commands.add("dpkg --configure -a")
+                    // 系统修复（串行）：先修复依赖再配置，避免dpkg配置时依赖缺失
                     commands.add("apt install -f -y")
+                    commands.add("dpkg --configure -a")
 
                     // 更新软件源
                     commands.add("apt update -y")
