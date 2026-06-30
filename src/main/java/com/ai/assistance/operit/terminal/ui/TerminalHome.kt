@@ -342,11 +342,14 @@ fun TerminalHome(
                 
                 // 虚拟键盘（当显示时）
                 if (showVirtualKeyboard) {
-                VirtualKeyboard(
-                    onKeyPress = { key -> env.onSendInput(key, false) },
-                    fontSize = fontSize * 0.85f,
-                    padding = padding * 0.7f
-                )
+                    VirtualKeyboard(
+                        onKeyPress = { key -> env.onSendInput(key, false) },
+                        fontSize = fontSize * 0.85f,
+                        padding = padding * 0.7f
+                    )
+                }
+            }
+        }
     }
 
     // 删除确认弹窗
@@ -625,7 +628,6 @@ private fun TerminalToolbar(
     }
 }
 
-@Composable
 @Composable
 private fun VirtualKeyboard(
     onKeyPress: (String) -> Unit,
