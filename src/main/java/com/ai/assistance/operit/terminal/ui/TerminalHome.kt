@@ -121,10 +121,10 @@ fun TerminalHome(
     LaunchedEffect(pendingShowIme) {
         if (pendingShowIme) {
             pendingShowIme = false
-            // 模仿全屏模式，在焦点切换后稍微延迟再请求输入法
-            delay(100)
+            delay(200)
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-            imm?.showSoftInput(rootView, InputMethodManager.SHOW_IMPLICIT)
+            imm?.showSoftInput(rootView, InputMethodManager.SHOW_FORCED)
+            isImeVisible = true
         }
     }
 
@@ -141,6 +141,8 @@ fun TerminalHome(
     // 非全屏模式下虚拟键盘显示状态
     var showVirtualKeyboard by remember { mutableStateOf(false) }
     var isDirectInputMode by remember { mutableStateOf(false) }
+    var isImeVisible by remember { mutableStateOf(false) }
+    var terminalViewRef by remember { mutableStateOf<CanvasTerminalView?>(null) }
 
     // 计算基于缩放因子的字体大小和间距
     val baseFontSize = 14.sp
@@ -214,6 +216,7 @@ fun TerminalHome(
                             setSessionScrollCallbacks(env.currentSessionId, { id, offset -> env.saveScrollOffset(id, offset) }, { id -> env.getScrollOffset(id) })
                             setFullscreenMode(false)
                             setOnRequestShowKeyboard {
+                                isImeVisible = true
                                 inputFocusRequester.requestFocus()
                                 pendingShowIme = true
                             }
@@ -224,9 +227,11 @@ fun TerminalHome(
                                 }
                                 false
                             }
+                            terminalViewRef = this
                         }
                     },
                     update = { view ->
+                        terminalViewRef = view
                         view.setConfig(fontConfig)
                         view.setEmulator(env.terminalEmulator)
                         view.setPty(currentPty)
@@ -239,6 +244,7 @@ fun TerminalHome(
                             view.setFullscreenMode(false)
                             view.setInputCallback { }
                             view.setOnRequestShowKeyboard {
+                                isImeVisible = true
                                 inputFocusRequester.requestFocus()
                                 pendingShowIme = true
                             }
@@ -259,14 +265,23 @@ fun TerminalHome(
                         onExitDirectMode = {
                             isDirectInputMode = false
                             showVirtualKeyboard = false
+                            isImeVisible = false
                         },
                         onToggleIme = {
                             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                            if (imm?.isAcceptingText == true) {
+                            if (isImeVisible) {
+                                isImeVisible = false
                                 keyboardController?.hide()
                                 imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
                             } else {
-                                imm?.showSoftInput(rootView, InputMethodManager.SHOW_IMPLICIT)
+                                isImeVisible = true
+                                val tv = terminalViewRef
+                                if (tv != null) {
+                                    tv.requestFocus()
+                                    tv.postDelayed({
+                                        imm?.showSoftInput(tv, InputMethodManager.SHOW_FORCED)
+                                    }, 200)
+                                }
                             }
                         },
                         fontSize = fontSize * 0.85f,
@@ -328,11 +343,13 @@ fun TerminalHome(
                             modifier = Modifier
                                 .padding(start = padding * 0.5f)
                                 .clickable {
-                                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                                    if (imm?.isAcceptingText == true) {
+                                    if (isImeVisible) {
+                                        isImeVisible = false
                                         keyboardController?.hide()
+                                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                                         imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
                                     } else {
+                                        isImeVisible = true
                                         inputFocusRequester.requestFocus()
                                         pendingShowIme = true
                                     }
