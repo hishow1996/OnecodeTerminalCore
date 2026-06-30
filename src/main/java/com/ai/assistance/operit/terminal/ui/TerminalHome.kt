@@ -192,8 +192,8 @@ fun TerminalHome(
                 // 虚拟键盘 - 会随 imePadding 一起上移
                 VirtualKeyboard(
                     onKeyPress = { key -> env.onSendInput(key, false) },
-                    fontSize = fontSize * 0.7f,
-                    padding = padding * 0.5f
+                    fontSize = fontSize * 0.85f,
+                    padding = padding * 0.7f
                 )
             }
         } else {
@@ -342,14 +342,11 @@ fun TerminalHome(
                 
                 // 虚拟键盘（当显示时）
                 if (showVirtualKeyboard) {
-                    VirtualKeyboard(
-                        onKeyPress = { key -> env.onSendInput(key, false) },
-                        fontSize = fontSize * 0.7f,
-                        padding = padding * 0.5f
-                    )
-                }
-            }
-        }
+                VirtualKeyboard(
+                    onKeyPress = { key -> env.onSendInput(key, false) },
+                    fontSize = fontSize * 0.85f,
+                    padding = padding * 0.7f
+                )
     }
 
     // 删除确认弹窗
@@ -429,8 +426,7 @@ private fun SessionTabBar(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFF2D2D2D),
-        shadowElevation = 4.dp
+        color = Color(0xFF2D2D2D)
     ) {
         Row(
             modifier = Modifier
@@ -533,7 +529,7 @@ private fun TerminalToolbar(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = Color(0xFF1A1A1A),
-        shadowElevation = 2.dp
+        shadowElevation = 0.dp
     ) {
         Row(
             modifier = Modifier
@@ -630,49 +626,102 @@ private fun TerminalToolbar(
 }
 
 @Composable
+@Composable
 private fun VirtualKeyboard(
     onKeyPress: (String) -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp
 ) {
+    var ctrlActive by remember { mutableStateOf(false) }
+    var altActive by remember { mutableStateOf(false) }
+
+    val handleKeyPress: (String) -> Unit = { key ->
+        if (ctrlActive) {
+            if (key.length == 1 && key[0] in 'a'..'z') {
+                onKeyPress((key[0].code - 96).toChar().toString())
+            } else if (key.length == 1 && key[0] in 'A'..'Z') {
+                onKeyPress((key[0].code - 64).toChar().toString())
+            } else {
+                onKeyPress(key)
+            }
+            ctrlActive = false
+        } else if (altActive) {
+            onKeyPress("\u001b$key")
+            altActive = false
+        } else {
+            onKeyPress(key)
+        }
+    }
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFF1A1A1A),
-        shadowElevation = 4.dp
+        color = Color(0xFF1A1A1A)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = padding, vertical = padding * 0.5f),
+                .padding(horizontal = padding, vertical = padding * 0.5f)
+                .padding(bottom = padding * 0.5f),
             verticalArrangement = Arrangement.spacedBy(padding * 0.5f)
         ) {
-            // 第一行：ESC, /, —, HOME, ↑, END, PGUP
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.5f)
             ) {
-                KeyButton("ESC", "\u001b", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("/", "/", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("—", "-", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("HOME", "\u001b[H", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("↑", "\u001b[A", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("END", "\u001b[F", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("PGUP", "\u001b[5~", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("/", "/", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("—", "-", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("PGUP", "\u001b[5~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
             }
-            
-            // 第二行：Tab, CTRL, ALT, ←, ↓, →, PGDN
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.5f)
             ) {
-                KeyButton("⇆", "\t", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("CTRL", "\u0003", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("ALT", "\u001b", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("←", "\u001b[D", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("↓", "\u001b[B", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("→", "\u001b[C", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("PGDN", "\u001b[6~", fontSize, padding, onKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive) { ctrlActive = !ctrlActive }
+                ModifierKeyButton("ALT", fontSize, padding, altActive) { altActive = !altActive }
+                KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("↓", "\u001b[B", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("→", "\u001b[C", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("PGDN", "\u001b[6~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
             }
+        }
+    }
+}
+
+@Composable
+private fun ModifierKeyButton(
+    label: String,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    padding: androidx.compose.ui.unit.Dp,
+    active: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .weight(1f)
+            .defaultMinSize(minHeight = 44.dp)
+            .clickable { onClick() },
+        color = if (active) Color(0xFF2A5A2A) else Color(0xFF3A3A3A),
+        shape = RoundedCornerShape(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = if (active) Color(0xFF00FF00) else Color.White,
+                fontFamily = FontFamily.Monospace,
+                fontSize = fontSize,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
         }
     }
 }
@@ -688,13 +737,14 @@ private fun KeyButton(
 ) {
     Surface(
         modifier = modifier
+            .defaultMinSize(minHeight = 44.dp)
             .clickable { onKeyPress(key) },
         color = Color(0xFF3A3A3A),
         shape = RoundedCornerShape(4.dp)
     ) {
         Box(
             modifier = Modifier
-                .padding(horizontal = padding * 0.5f, vertical = padding * 0.8f),
+                .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
             contentAlignment = Alignment.Center
         ) {
             Text(
