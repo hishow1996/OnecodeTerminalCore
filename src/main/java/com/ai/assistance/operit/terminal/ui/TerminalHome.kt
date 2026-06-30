@@ -1,4 +1,4 @@
-﻿package com.ai.assistance.operit.terminal.ui
+package com.ai.assistance.operit.terminal.ui
 
 import android.content.Context
 import android.os.Build
@@ -251,120 +251,131 @@ fun TerminalHome(
                         .weight(1f)
                         .background(Color.Black)
                 )
-                
-                // 终端工具栏
-                TerminalToolbar(
-                    onInterrupt = env::onInterrupt,
-                    onEnter = { env.onSendInput("\r", false) },
-                    onSendCommand = { env.onSendInput(it, true) },
-                    fontSize = fontSize * 0.8f,
-                    padding = padding,
-                    onNavigateToSetup = onNavigateToSetup,
-                    onNavigateToSettings = onNavigateToSettings
-                )
-                
-                // 当前输入行
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(padding),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        modifier = Modifier.padding(end = padding * 0.5f),
-                        color = Color(0xFF006400), // DarkGreen
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = getTruncatedPrompt(env.currentDirectory.ifEmpty { "$ " }),
-                            color = Color.White,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSize,
-                            modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
-                        )
-                    }
-                    BasicTextField(
-                        value = env.command,
-                        onValueChange = env::onCommandChange,
-                        modifier = Modifier
-                            .weight(1f)
-                            .focusRequester(inputFocusRequester),
-                        enabled = !isDirectInputMode,
-                        textStyle = TextStyle(
-                            color = SyntaxColors.commandDefault,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSize
-                        ),
-                        cursorBrush = SolidColor(Color.Green),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = {
-                            env.onSendInput(env.command, true)
-                        })
-                    )
-                    // 系统软键盘切换按钮
-                    Surface(
-                        modifier = Modifier
-                            .padding(start = padding * 0.5f)
-                            .clickable {
-                                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                                if (imm?.isAcceptingText == true) {
-                                    keyboardController?.hide()
-                                    imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
-                                } else {
-                                    if (!isDirectInputMode) {
-                                        inputFocusRequester.requestFocus()
-                                        pendingShowIme = true
-                                    } else {
-                                        imm?.showSoftInput(rootView, InputMethodManager.SHOW_IMPLICIT)
-                                    }
-                                }
-                            },
-                        color = Color(0xFF3A3A3A),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = "⌨",
-                            color = Color.White,
-                            fontFamily = FontFamily.Default,
-                            fontSize = fontSize * 1.2f,
-                            modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
-                        )
-                    }
-                    Surface(
-                        modifier = Modifier
-                            .padding(start = padding * 0.5f)
-                            .clickable {
-                                isDirectInputMode = !isDirectInputMode
-                                if (isDirectInputMode) {
-                                    showVirtualKeyboard = true
-                                    env.onCommandChange("")
-                                    keyboardController?.hide()
-                                } else {
-                                    showVirtualKeyboard = false
-                                    keyboardController?.show()
-                                }
-                            },
-                        color = if (isDirectInputMode) Color(0xFF4A4A4A) else Color(0xFF3A3A3A),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text(
-                            text = "⇄",
-                            color = Color.White,
-                            fontFamily = FontFamily.Default,
-                            fontSize = fontSize * 1.1f,
-                            modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
-                        )
-                    }
-                }
-                
-                // 虚拟键盘（当显示时）
-                if (showVirtualKeyboard) {
-                    VirtualKeyboard(
+
+                if (isDirectInputMode) {
+                    DirectInputCompactBar(
                         onKeyPress = { key -> env.onSendInput(key, false) },
+                        onInterrupt = env::onInterrupt,
+                        onExitDirectMode = {
+                            isDirectInputMode = false
+                            showVirtualKeyboard = false
+                        },
+                        onToggleIme = {
+                            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                            if (imm?.isAcceptingText == true) {
+                                keyboardController?.hide()
+                                imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
+                            } else {
+                                imm?.showSoftInput(rootView, InputMethodManager.SHOW_IMPLICIT)
+                            }
+                        },
                         fontSize = fontSize * 0.85f,
                         padding = padding * 0.7f
                     )
+                } else {
+                    // 终端工具栏
+                    TerminalToolbar(
+                        onInterrupt = env::onInterrupt,
+                        onEnter = { env.onSendInput("\r", false) },
+                        onSendCommand = { env.onSendInput(it, true) },
+                        fontSize = fontSize * 0.8f,
+                        padding = padding,
+                        onNavigateToSetup = onNavigateToSetup,
+                        onNavigateToSettings = onNavigateToSettings
+                    )
+
+                    // 当前输入行
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(padding),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            modifier = Modifier.padding(end = padding * 0.5f),
+                            color = Color(0xFF006400),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = getTruncatedPrompt(env.currentDirectory.ifEmpty { "$ " }),
+                                color = Color.White,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = fontSize,
+                                modifier = Modifier.padding(horizontal = padding * 0.5f, vertical = padding * 0.1f)
+                            )
+                        }
+                        BasicTextField(
+                            value = env.command,
+                            onValueChange = env::onCommandChange,
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(inputFocusRequester),
+                            enabled = !isDirectInputMode,
+                            textStyle = TextStyle(
+                                color = SyntaxColors.commandDefault,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = fontSize
+                            ),
+                            cursorBrush = SolidColor(Color.Green),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = {
+                                env.onSendInput(env.command, true)
+                            })
+                        )
+                        // 系统软键盘切换按钮
+                        Surface(
+                            modifier = Modifier
+                                .padding(start = padding * 0.5f)
+                                .clickable {
+                                    val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                    if (imm?.isAcceptingText == true) {
+                                        keyboardController?.hide()
+                                        imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
+                                    } else {
+                                        inputFocusRequester.requestFocus()
+                                        pendingShowIme = true
+                                    }
+                                },
+                            color = Color(0xFF3A3A3A),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "⌨",
+                                color = Color.White,
+                                fontFamily = FontFamily.Default,
+                                fontSize = fontSize * 1.2f,
+                                modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
+                            )
+                        }
+                        Surface(
+                            modifier = Modifier
+                                .padding(start = padding * 0.5f)
+                                .clickable {
+                                    isDirectInputMode = true
+                                    env.onCommandChange("")
+                                },
+                            color = Color(0xFF3A3A3A),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "⇄",
+                                color = Color.White,
+                                fontFamily = FontFamily.Default,
+                                fontSize = fontSize * 1.1f,
+                                modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
+                            )
+                        }
+                    }
+
+                    // 虚拟键盘（当显示时）
+                    if (showVirtualKeyboard) {
+                        VirtualKeyboard(
+                            onKeyPress = { key -> env.onSendInput(key, false) },
+                            fontSize = fontSize * 0.85f,
+                            padding = padding * 0.7f
+                        )
+                    }
                 }
             }
         }
@@ -775,6 +786,121 @@ private fun KeyButton(
                 fontWeight = FontWeight.Medium,
                 maxLines = 1
             )
+        }
+    }
+}
+
+@Composable
+private fun DirectInputCompactBar(
+    onKeyPress: (String) -> Unit,
+    onInterrupt: () -> Unit,
+    onExitDirectMode: () -> Unit,
+    onToggleIme: () -> Unit,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    padding: androidx.compose.ui.unit.Dp
+) {
+    var ctrlActive by remember { mutableStateOf(false) }
+    var altActive by remember { mutableStateOf(false) }
+
+    val handleKeyPress: (String) -> Unit = { key ->
+        if (ctrlActive) {
+            if (key.length == 1 && key[0] in 'a'..'z') {
+                onKeyPress((key[0].code - 96).toChar().toString())
+            } else if (key.length == 1 && key[0] in 'A'..'Z') {
+                onKeyPress((key[0].code - 64).toChar().toString())
+            } else {
+                onKeyPress(key)
+            }
+            ctrlActive = false
+        } else if (altActive) {
+            onKeyPress("\u001b$key")
+            altActive = false
+        } else {
+            onKeyPress(key)
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF1A1A1A)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = padding * 0.5f, vertical = padding * 0.3f),
+            verticalArrangement = Arrangement.spacedBy(padding * 0.3f)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
+            ) {
+                KeyButton("Ctrl+C", "\u0003", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("PGDN", "\u001b[6~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
+                KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 44.dp)
+                        .clickable { onExitDirectMode() },
+                    color = Color(0xFF3A3A3A),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "⇄",
+                            color = Color.White,
+                            fontFamily = FontFamily.Default,
+                            fontSize = fontSize * 1.1f,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
+            ) {
+                KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("Enter", "\r", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("PGUP", "\u001b[5~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("↓", "\u001b[B", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("→", "\u001b[C", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 44.dp)
+                        .clickable { onToggleIme() },
+                    color = Color(0xFF3A3A3A),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "⌨",
+                            color = Color.White,
+                            fontFamily = FontFamily.Default,
+                            fontSize = fontSize * 1.2f,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
         }
     }
 } 
