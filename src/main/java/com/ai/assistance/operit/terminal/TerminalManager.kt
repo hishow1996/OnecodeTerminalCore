@@ -231,7 +231,7 @@ class TerminalManager private constructor(
         
         if (session.isInteractiveMode || isInitializing) {
             Log.d(TAG, "Session in interactive mode or initializing, sending as input: $command")
-            sendInput(command + "\n")
+            sendInput(command + "\r")
             return actualCommandId
         }
 
@@ -240,7 +240,7 @@ class TerminalManager private constructor(
                 // 有命令正在执行（如TUI程序：vim、top、kimchi等），直接将输入发送到PTY
                 Log.d(TAG, "Command executing, sending as input to PTY: $command")
                 try {
-                    session.sessionWriter?.write(command + "\n")
+                    session.sessionWriter?.write(command + "\r")
                     session.sessionWriter?.flush()
                 } catch (e: Exception) {
                     Log.e(TAG, "Error sending input to PTY", e)
@@ -264,7 +264,7 @@ class TerminalManager private constructor(
         if (session.isInteractiveMode) {
             Log.d(TAG, "Session $sessionId in interactive mode, sending as input: $command")
             try {
-                session.sessionWriter?.write(command + "\n")
+                session.sessionWriter?.write(command + "\r")
                 session.sessionWriter?.flush()
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending input to session $sessionId", e)
@@ -277,7 +277,7 @@ class TerminalManager private constructor(
                 // 有命令正在执行（如TUI程序），直接将输入发送到PTY
                 Log.d(TAG, "Command executing in session $sessionId, sending as input to PTY: $command")
                 try {
-                    session.sessionWriter?.write(command + "\n")
+                    session.sessionWriter?.write(command + "\r")
                     session.sessionWriter?.flush()
                 } catch (e: Exception) {
                     Log.e(TAG, "Error sending input to session $sessionId", e)
@@ -316,7 +316,7 @@ class TerminalManager private constructor(
     private suspend fun executeCommandInternal(command: String, session: TerminalSessionData, commandId: String) {
         if (command.trim() == "clear") {
             try {
-                session.sessionWriter?.write("clear\n")
+                session.sessionWriter?.write("clear\r")
                 session.sessionWriter?.flush()
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending 'clear' command", e)
@@ -324,7 +324,7 @@ class TerminalManager private constructor(
         } else {
             handleRegularCommand(command, session, commandId)
             try {
-                val fullInput = "$command\n"
+                val fullInput = "$command\r"
                 session.sessionWriter?.write(fullInput)
                 session.sessionWriter?.flush()
                 Log.d(TAG, "Sent command to PTY: $command")
