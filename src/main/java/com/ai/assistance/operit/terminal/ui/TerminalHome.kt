@@ -835,9 +835,9 @@ private fun DirectInputCompactBar(
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
                 KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("/", "/", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("Ctrl+C", "\u0003", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("Enter", "\r", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("PGUP", "\u001b[5~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
@@ -845,7 +845,7 @@ private fun DirectInputCompactBar(
                     modifier = Modifier
                         .weight(1f)
                         .defaultMinSize(minHeight = 44.dp)
-                        .clickable { onExitDirectMode() },
+                        .clickable { onToggleIme() },
                     color = Color(0xFF3A3A3A),
                     shape = RoundedCornerShape(4.dp)
                 ) {
@@ -855,10 +855,10 @@ private fun DirectInputCompactBar(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "⇄",
+                            text = "⌨",
                             color = Color.White,
                             fontFamily = FontFamily.Default,
-                            fontSize = fontSize * 1.1f,
+                            fontSize = fontSize * 1.2f,
                             fontWeight = FontWeight.Medium,
                             maxLines = 1
                         )
@@ -881,7 +881,7 @@ private fun DirectInputCompactBar(
                     modifier = Modifier
                         .weight(1f)
                         .defaultMinSize(minHeight = 44.dp)
-                        .clickable { onToggleIme() },
+                        .clickable { onExitDirectMode() },
                     color = Color(0xFF3A3A3A),
                     shape = RoundedCornerShape(4.dp)
                 ) {
@@ -891,10 +891,10 @@ private fun DirectInputCompactBar(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "⌨",
+                            text = "⇄",
                             color = Color.White,
                             fontFamily = FontFamily.Default,
-                            fontSize = fontSize * 1.2f,
+                            fontSize = fontSize * 1.1f,
                             fontWeight = FontWeight.Medium,
                             maxLines = 1
                         )
