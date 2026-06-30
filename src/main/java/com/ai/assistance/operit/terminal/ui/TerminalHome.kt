@@ -684,8 +684,8 @@ private fun VirtualKeyboard(
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.5f)
             ) {
                 KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive) { ctrlActive = !ctrlActive }
-                ModifierKeyButton("ALT", fontSize, padding, altActive) { altActive = !altActive }
+                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
+                ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
                 KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↓", "\u001b[B", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("→", "\u001b[C", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
@@ -701,11 +701,11 @@ private fun ModifierKeyButton(
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     active: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = Modifier
-            .weight(1f)
+        modifier = modifier
             .defaultMinSize(minHeight = 44.dp)
             .clickable { onClick() },
         color = if (active) Color(0xFF2A5A2A) else Color(0xFF3A3A3A),
