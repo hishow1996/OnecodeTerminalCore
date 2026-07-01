@@ -212,6 +212,7 @@ fun TerminalHome(
                 AndroidView(
                     factory = { context ->
                         CanvasTerminalView(context).apply {
+                            setBackgroundColor(android.graphics.Color.BLACK)
                             setConfig(fontConfig)
                             setEmulator(env.terminalEmulator)
                             setPty(currentPty)
