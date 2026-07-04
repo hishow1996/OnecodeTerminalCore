@@ -172,9 +172,8 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding() // 让整个列随软键盘上移
             ) {
-                // 终端输出区域
+                // 终端输出区域 - 固定占剩余空间，不随键盘上移
                 CanvasTerminalScreen(
                     emulator = env.terminalEmulator,
                     modifier = Modifier.weight(1f),
@@ -185,12 +184,13 @@ fun TerminalHome(
                     onScrollOffsetChanged = { id, offset -> env.saveScrollOffset(id, offset) },
                     getScrollOffset = { id -> env.getScrollOffset(id) }
                 )
-                
-                // 虚拟键盘 - 会随 imePadding 一起上移
+
+                // 虚拟键盘 - 随 IME 上移
                 VirtualKeyboard(
                     onKeyPress = { key -> env.onSendInput(key, false) },
                     fontSize = fontSize * 0.85f,
-                    padding = padding * 0.7f
+                    padding = padding * 0.7f,
+                    modifier = Modifier.imePadding()
                 )
             }
         } else {
@@ -198,7 +198,6 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding()
             ) {
                 AndroidView(
                     factory = { context ->
@@ -278,10 +277,12 @@ fun TerminalHome(
                             }
                         },
                         fontSize = fontSize * 0.85f,
-                        padding = padding * 0.7f
+                        padding = padding * 0.7f,
+                        modifier = Modifier.imePadding()
                     )
                 } else {
-                    // 终端工具栏
+                    // 终端工具栏 + 输入行 随 IME 上移
+                    Column(modifier = Modifier.imePadding()) {
                     TerminalToolbar(
                         onInterrupt = env::onInterrupt,
                         onEnter = { env.onSendInput("\r", false) },
@@ -387,6 +388,7 @@ fun TerminalHome(
                             padding = padding * 0.7f
                         )
                     }
+                    } // 关闭 imePadding Column
                 }
             }
         }
@@ -468,8 +470,8 @@ private fun SessionTabBar(
     onCloseSession: (String) -> Unit
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFF2D2D2D)
+        modifier = modifier.fillMaxWidth(),
+        color = Color(0xFF1A1A1A)
     ) {
         Row(
             modifier = Modifier
@@ -802,13 +804,46 @@ private fun KeyButton(
 }
 
 @Composable
+private fun OrangeKeyButton(
+    label: String,
+    onClick: () -> Unit,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    padding: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .defaultMinSize(minHeight = 44.dp)
+            .clickable { onClick() },
+        color = Color(0xFFFF8800),
+        shape = RoundedCornerShape(4.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = Color.White,
+                fontFamily = FontFamily.Monospace,
+                fontSize = fontSize,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
 private fun DirectInputCompactBar(
     onKeyPress: (String) -> Unit,
     onInterrupt: () -> Unit,
     onExitDirectMode: () -> Unit,
     onToggleIme: () -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
-    padding: androidx.compose.ui.unit.Dp
+    padding: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier
 ) {
     var ctrlActive by remember { mutableStateOf(false) }
     var altActive by remember { mutableStateOf(false) }
@@ -841,77 +876,35 @@ private fun DirectInputCompactBar(
                 .padding(horizontal = padding * 0.5f, vertical = padding * 0.3f),
             verticalArrangement = Arrangement.spacedBy(padding * 0.3f)
         ) {
+            // 第1行：ESC  /  Tab  HOME  ↑  END  PGUP  ⌨(橙)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
                 KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("/", "/", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("Enter", "\r", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("PGUP", "\u001b[5~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .defaultMinSize(minHeight = 44.dp)
-                        .clickable { onToggleIme() },
-                    color = Color(0xFF3A3A3A),
-                    shape = RoundedCornerShape(4.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "⌨",
-                            color = Color.White,
-                            fontFamily = FontFamily.Default,
-                            fontSize = fontSize * 1.2f,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1
-                        )
-                    }
-                }
+                OrangeKeyButton("⌨", onToggleIme, fontSize, padding, modifier = Modifier.weight(1f))
             }
 
+            // 第2行：⇄(发送Tab,plan/build切换)  CTRL  ALT  ←  ↓  →  PGDN  ⏎(橙)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
+                KeyButton("⇄", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
                 ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
-                KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↓", "\u001b[B", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("→", "\u001b[C", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("PGDN", "\u001b[6~", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .defaultMinSize(minHeight = 44.dp)
-                        .clickable { onExitDirectMode() },
-                    color = Color(0xFF3A3A3A),
-                    shape = RoundedCornerShape(4.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "⇄",
-                            color = Color.White,
-                            fontFamily = FontFamily.Default,
-                            fontSize = fontSize * 1.1f,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1
-                        )
-                    }
-                }
+                OrangeKeyButton("\u23CE", { onKeyPress("\r") }, fontSize, padding, modifier = Modifier.weight(1f))
             }
         }
     }
-} 
+}

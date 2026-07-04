@@ -135,8 +135,11 @@ class AnsiTerminalEmulator(
      * 处理普通文本字符
      */
     private fun handleText(char: Char) {
-        // 检查是否需要自动换行
-        if (cursorX >= screenWidth) {
+        val wide = isWideChar(char)
+        val cellWidth = if (wide) 2 else 1
+
+        // 宽字符占两格：若放在最后一列会溢出右边界，需提前换行
+        if (cursorX + cellWidth > screenWidth) {
             if (autoWrapMode) {
                 // 标记当前行为软换行
                 if (cursorY >= 0 && cursorY < screenHeight) {
@@ -149,14 +152,42 @@ class AnsiTerminalEmulator(
                     scrollUp(1)
                 }
             } else {
-                cursorX = screenWidth - 1
+                cursorX = screenWidth - cellWidth
+                if (cursorX < 0) cursorX = 0
             }
         }
-        
-        // 写入字符
+
+        // 写入字符（宽字符推进两格）
         if (cursorY < screenHeight && cursorX < screenWidth) {
             screenBuffer[cursorY][cursorX] = TerminalChar(char, currentAttributes)
-            cursorX++
+            if (wide && cursorX + 1 < screenWidth) {
+                // 宽字符占第二格：用一个隐藏占位符，避免渲染时光标漂移
+                val attrs = currentAttributes.applyHidden(true)
+                screenBuffer[cursorY][cursorX + 1] = TerminalChar(' ', attrs)
+            }
+            cursorX += cellWidth
+        }
+    }
+
+    /**
+     * 简易宽字符判断（CJK/全角都占两格）。
+     * 与 view 层 TextMetrics.isWideChar 保持一致。
+     */
+    private fun isWideChar(char: Char): Boolean {
+        val code = char.code
+        return when {
+            code < 0x1100 -> false
+            code in 0x1100..0x115F -> true    // Hangul Jamo
+            code == 0x2329 || code == 0x232A -> true
+            code in 0x2E80..0xA4CF -> true     // CJK 部首/康熙
+            code in 0xAC00..0xD7A3 -> true     // Hangul 音节
+            code in 0xF900..0xFAFF -> true     // CJK 兼容
+            code in 0xFE30..0xFE4F -> true     // CJK 兼容形式
+            code in 0xFF00..0xFF60 -> true      // 全角 ASCII/标点
+            code in 0xFFE0..0xFFE6 -> true     // 全角符号
+            code in 0x1F300..0x1FAFF -> true   // Emoji/符号扩展
+            code in 0x20000..0x3FFFD -> true    // CJK 扩展B-F
+            else -> false
         }
     }
     

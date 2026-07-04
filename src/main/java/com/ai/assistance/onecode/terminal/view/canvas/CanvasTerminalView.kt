@@ -779,7 +779,11 @@ class CanvasTerminalView @JvmOverloads constructor(
     
     private fun drawTerminal(canvas: Canvas) {
         val em = emulator ?: return
-        
+
+        // 限制绘制区域，防止越界绘制污染屏幕外区域
+        canvas.save()
+        canvas.clipRect(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
+
         // 处理惯性滚动动画
         if (scroller.computeScrollOffset()) {
             val newScrollY = scroller.currY.toFloat()
@@ -892,6 +896,9 @@ class CanvasTerminalView @JvmOverloads constructor(
                 )
             }
         }
+
+        // 恢复 clipRect
+        canvas.restore()
     }
     
     private fun drawLine(
@@ -1067,21 +1074,31 @@ class CanvasTerminalView @JvmOverloads constructor(
         textMetrics.applyStyle(isBold, isItalic)
         textMetrics.setFont(fontType)
         textPaint.color = color
-        
-        canvas.drawText(text, x, y, textPaint)
-        
+
+        // 逐字符按固定 cell 宽对齐绘制，杜绝自然 advance 漂移导致越界
+        if (text.length <= 1) {
+            canvas.drawText(text, x, y, textPaint)
+        } else {
+            var cx = x
+            for (ch in text) {
+                canvas.drawText(ch.toString(), cx, y, textPaint)
+                val cw = charWidth * textMetrics.getCellWidth(ch)
+                cx += cw
+            }
+        }
+
         val runWidth = if (text.length == 1) charWidth else text.length * textMetrics.charWidth
-        
+
         if (isUnderline) {
             val underlineY = y + 2
             canvas.drawLine(x, underlineY, x + runWidth, underlineY, textPaint)
         }
-        
+
         if (isStrike) {
             val strikeY = y - textMetrics.charHeight / 2
             canvas.drawLine(x, strikeY, x + runWidth, strikeY, textPaint)
         }
-        
+
         textMetrics.resetStyle()
     }
     
@@ -1573,6 +1590,18 @@ class CanvasTerminalView @JvmOverloads constructor(
                 event?.let {
                     when (it.action) {
                         KeyEvent.ACTION_DOWN -> {
+                            // Ctrl + A..Z → 控制字符 (Ctrl+P → \u0010, Ctrl+C → \u0003, etc.)
+                            if (it.isCtrlPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
+                                val ctrlChar = (it.keyCode - KeyEvent.KEYCODE_A + 1).toChar()
+                                inputCallback?.invoke(ctrlChar.toString())
+                                return true
+                            }
+                            // Alt + 字母 → ESC 前缀序列
+                            if (it.isAltPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
+                                val ch = (it.keyCode - KeyEvent.KEYCODE_A + 'a'.code).toChar()
+                                inputCallback?.invoke("\u001b$ch")
+                                return true
+                            }
                             when (it.keyCode) {
                                 KeyEvent.KEYCODE_DEL -> {
                                     inputCallback?.invoke("\u007F")
@@ -1673,6 +1702,64 @@ class CanvasTerminalView @JvmOverloads constructor(
      */
     override fun onCheckIsTextEditor(): Boolean {
         return isFullscreenMode
+    }
+
+    /**
+     * 硬件键盘事件处理：捕获 Ctrl+字母 等控制组合键，
+     * 直接发给 PTY，避免默认 InputConnection 路径丢弃这些事件。
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        event?.let {
+            if (it.action == KeyEvent.ACTION_DOWN) {
+                // Ctrl + A..Z → 控制字符 (Ctrl+P → \u0010, Ctrl+C → \u0003, etc.)
+                if (it.isCtrlPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
+                    val ctrlChar = (it.keyCode - KeyEvent.KEYCODE_A + 1).toChar()
+                    inputCallback?.invoke(ctrlChar.toString())
+                    return true
+                }
+                // Alt + 字母 → ESC 前缀序列
+                if (it.isAltPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
+                    val ch = (it.keyCode - KeyEvent.KEYCODE_A + 'a'.code).toChar()
+                    inputCallback?.invoke("\u001b$ch")
+                    return true
+                }
+                // Enter / DEL 直送
+                if (it.keyCode == KeyEvent.KEYCODE_ENTER) {
+                    inputCallback?.invoke("\r")
+                    return true
+                }
+                if (it.keyCode == KeyEvent.KEYCODE_DEL) {
+                    inputCallback?.invoke("\u007F")
+                    return true
+                }
+                // 方向键
+                if (it.keyCode in intArrayOf(
+                        KeyEvent.KEYCODE_DPAD_UP,
+                        KeyEvent.KEYCODE_DPAD_DOWN,
+                        KeyEvent.KEYCODE_DPAD_LEFT,
+                        KeyEvent.KEYCODE_DPAD_RIGHT
+                    )) {
+                    if (isFullscreenMode) {
+                        handleArrowKeyDown(it.keyCode)
+                        return true
+                    }
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode in intArrayOf(
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT
+            ) && isFullscreenMode) {
+            handleArrowKeyUp()
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
     
     /**
