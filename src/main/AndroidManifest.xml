@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.ai.assistance.operit.terminal">
+    package="com.ai.assistance.onecode.terminal">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -9,7 +9,7 @@
         <!-- Ubuntu File System Documents Provider for SAF -->
         <provider
             android:name=".provider.UbuntuDocumentsProvider"
-            android:authorities="com.ai.assistance.operit.documents.ubuntu"
+            android:authorities="com.ai.assistance.onecode.documents.ubuntu"
             android:exported="true"
             android:grantUriPermissions="true"
             android:permission="android.permission.MANAGE_DOCUMENTS">

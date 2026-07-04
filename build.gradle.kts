@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.ai.assistance.operit.terminal"
+    namespace = "com.ai.assistance.onecode.terminal"
     compileSdk = 34
 
     defaultConfig {
