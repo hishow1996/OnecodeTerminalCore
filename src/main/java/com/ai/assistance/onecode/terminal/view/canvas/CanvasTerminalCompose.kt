@@ -20,7 +20,8 @@ fun CanvasTerminalScreen(
     onScaleChanged: (Float) -> Unit = {},
     sessionId: String? = null,
     onScrollOffsetChanged: ((String, Float) -> Unit)? = null,
-    getScrollOffset: ((String) -> Float)? = null
+    getScrollOffset: ((String) -> Float)? = null,
+    onViewReady: ((CanvasTerminalView) -> Unit)? = null
 ) {
     AndroidView(
         factory = { context ->
@@ -31,12 +32,15 @@ fun CanvasTerminalScreen(
                 setInputCallback(onInput)
                 setScaleCallback(onScaleChanged)
                 setSessionScrollCallbacks(sessionId, onScrollOffsetChanged, getScrollOffset)
-                
+
                 // 全屏模式下自动请求焦点
                 post {
                     requestFocus()
                 }
-                
+
+                // 通知外层已创建好 view 实例
+                onViewReady?.invoke(this)
+
                 // 请求父容器不要拦截触摸事件，让终端视图处理滚动和缩放手势
                 setOnTouchListener { v, event ->
                     when (event.action) {

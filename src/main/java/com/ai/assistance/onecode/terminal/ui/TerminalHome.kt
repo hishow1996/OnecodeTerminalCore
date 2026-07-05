@@ -135,6 +135,13 @@ fun TerminalHome(
     var showVirtualKeyboard by remember { mutableStateOf(false) }
     var isDirectInputMode by remember { mutableStateOf(false) }
 
+    // 进入 opencode (alt screen/fullscreen) 时自动切到直输模式，显示定制快捷栏
+    LaunchedEffect(env.isFullscreen) {
+        if (env.isFullscreen) {
+            isDirectInputMode = true
+        }
+    }
+
     // 计算基于缩放因子的字体大小和间距
     val baseFontSize = 14.sp
     val fontSize = with(LocalDensity.current) {
@@ -183,15 +190,49 @@ fun TerminalHome(
                     onInput = { env.onSendInput(it, false) },
                     sessionId = env.currentSessionId,
                     onScrollOffsetChanged = { id, offset -> env.saveScrollOffset(id, offset) },
-                    getScrollOffset = { id -> env.getScrollOffset(id) }
+                    getScrollOffset = { id -> env.getScrollOffset(id) },
+                    onViewReady = { terminalViewRef = it }
                 )
 
-                // 虚拟键盘 - 随外层 imePadding 一起上移
-                VirtualKeyboard(
-                    onKeyPress = { key -> env.onSendInput(key, false) },
-                    fontSize = fontSize * 0.85f,
-                    padding = padding * 0.7f
-                )
+                // 底部快捷栏 - 直输模式用定制快捷栏(含橙色⌨/⏎/⇄), 否则回退到 VirtualKeyboard
+                if (isDirectInputMode) {
+                    DirectInputCompactBar(
+                        onKeyPress = { key -> env.onSendInput(key, false) },
+                        onInterrupt = env::onInterrupt,
+                        onExitDirectMode = {
+                            isDirectInputMode = false
+                            showVirtualKeyboard = false
+                            imeShown = false
+                        },
+                        onToggleIme = {
+                            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                            if (imeShown) {
+                                imeShown = false
+                                keyboardController?.hide()
+                                imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
+                            } else {
+                                val tv = terminalViewRef
+                                if (tv != null) {
+                                    tv.requestFocus()
+                                    tv.post {
+                                        imm?.showSoftInput(tv, InputMethodManager.SHOW_FORCED)
+                                    }
+                                    imeShown = true
+                                }
+                            }
+                        },
+                        // 已在 fullscreen 分支内, ⇄ 永远发 Tab (opencode plan/build 切换)
+                        switchAction = { env.onSendInput("\t", false) },
+                        fontSize = fontSize * 0.85f,
+                        padding = padding * 0.7f
+                    )
+                } else {
+                    VirtualKeyboard(
+                        onKeyPress = { key -> env.onSendInput(key, false) },
+                        fontSize = fontSize * 0.85f,
+                        padding = padding * 0.7f
+                    )
+                }
             }
         } else {
             Column(
