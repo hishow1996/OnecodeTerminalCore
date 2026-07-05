@@ -470,8 +470,8 @@ private fun SessionTabBar(
     onCloseSession: (String) -> Unit
 ) {
     Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = Color(0xFF1A1A1A)
+        modifier = Modifier.fillMaxWidth(),
+        color = Color(0xFF2D2D2D)
     ) {
         Row(
             modifier = Modifier
@@ -674,7 +674,8 @@ private fun TerminalToolbar(
 private fun VirtualKeyboard(
     onKeyPress: (String) -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
-    padding: androidx.compose.ui.unit.Dp
+    padding: androidx.compose.ui.unit.Dp,
+    modifier: Modifier = Modifier
 ) {
     var ctrlActive by remember { mutableStateOf(false) }
     var altActive by remember { mutableStateOf(false) }
@@ -698,7 +699,7 @@ private fun VirtualKeyboard(
     }
 
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         color = Color(0xFF1A1A1A)
     ) {
         Column(
