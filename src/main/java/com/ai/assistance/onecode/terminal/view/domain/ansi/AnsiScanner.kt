@@ -70,6 +70,12 @@ class AnsiScanner(private val input: String) {
         val start = position
         next() // 消费 ESC 字符
         
+        // ESC 后面没有更多字符：整段是不完整序列，回退并把 ESC 留待下一块
+        if (!hasNext()) {
+            position = start
+            return AnsiSequence.Incomplete
+        }
+        
         return when (peek()) {
             '[' -> scanCSI()
             ']' -> scanOSC()
@@ -103,6 +109,7 @@ class AnsiScanner(private val input: String) {
      * 格式: ESC [ [params] [intermediates] command
      */
     private fun scanCSI(): AnsiSequence {
+        val start = position
         next() // 消费 '['
         
         // 检查是否为私有模式 (以 ? 开头)
@@ -131,16 +138,25 @@ class AnsiScanner(private val input: String) {
             }
         }
         
+        // 没有更多字符意味着 CSI 未结束（命令字节缺失），整段留待下一块
+        if (!hasNext()) {
+            position = start
+            return AnsiSequence.Incomplete
+        }
+        
         // 读取命令字符 (0x40-0x7E)
         val command = if (hasNext()) {
             val char = peek()!!
             if (char.code in 0x40..0x7E) {
                 next()!!
             } else {
-                '?' // 无效命令
+                // 命令字节位置出现了非命令字符：序列非法，按未知处理（不回退，避免死循环）
+                next()!!
+                '?'
             }
         } else {
-            '?' // 未完成的序列
+            // 不可达：上面已经判断过 hasNext
+            '?'
         }
         
         // 解析参数
@@ -165,6 +181,7 @@ class AnsiScanner(private val input: String) {
      * 格式: ESC ] command ; data BEL 或 ESC ] command ; data ESC \
      */
     private fun scanOSC(): AnsiSequence {
+        val oscStart = position
         next() // 消费 ']'
         
         // 读取命令号
@@ -199,6 +216,12 @@ class AnsiScanner(private val input: String) {
             }
         }
         
+        // 流末仍未遇到 BEL/ST：OSC 未终结，整段回退留待下一块
+        if (!hasNext()) {
+            position = oscStart
+            return AnsiSequence.Incomplete
+        }
+        
         return AnsiSequence.OSC(command, dataBuilder.toString())
     }
     
@@ -207,6 +230,7 @@ class AnsiScanner(private val input: String) {
      * 格式: ESC P data ST
      */
     private fun scanDCS(): AnsiSequence {
+        val dcsStart = position
         next() // 消费 'P'
         
         // 读取数据直到 ST (ESC \)
@@ -220,6 +244,12 @@ class AnsiScanner(private val input: String) {
             } else {
                 dataBuilder.append(next())
             }
+        }
+        
+        // 流末仍未遇到 ST：DCS 未终结，整段回退留待下一块
+        if (!hasNext()) {
+            position = dcsStart
+            return AnsiSequence.Incomplete
         }
         
         return AnsiSequence.DCS(dataBuilder.toString())

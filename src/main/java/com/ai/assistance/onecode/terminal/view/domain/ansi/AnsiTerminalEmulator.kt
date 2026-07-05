@@ -104,13 +104,22 @@ class AnsiTerminalEmulator(
     // 缓存完整内容的视图（避免每次创建新列表）
     private val fullContentView = FullContentView()
     
+    // 由上一次 parse 末尾截留下来的、尚未终结的转义序列；本次作为新数据的前缀一起解析，
+    // 修复 ANSI 序列被 PTY 块边界切断后，前导 ESC 在前一帧丢失、本帧的 [31m 被当成普通文本
+    // 渲染出散乱数字/字母的问题。
+    private var pendingSequence: String = ""
+    
     /**
      * 解析并执行 ANSI 序列
      */
     fun parse(text: String) {
-        val scanner = AnsiScanner(text)
+        val combined = if (pendingSequence.isEmpty()) text else pendingSequence + text
+        pendingSequence = ""
+        val scanner = AnsiScanner(combined)
         
         while (scanner.hasNext()) {
+            // 记录本次扫描的起点：若扫描器返回 Incomplete（流末未终结），从此处回退留待下一帧
+            val seqStart = scanner.getPosition()
             when (val seq = scanner.scanNext()) {
                 is AnsiSequence.Text -> handleText(seq.char)
                 is AnsiSequence.ControlChar -> handleControlChar(seq)
@@ -120,6 +129,14 @@ class AnsiTerminalEmulator(
                 is AnsiSequence.DCS -> handleDCS(seq)
                 is AnsiSequence.Unknown -> {
                     Log.w(TAG, "Unknown sequence: ${seq.raw}")
+                }
+                is AnsiSequence.Incomplete -> {
+                    // 末尾不完整转义序列，留待下一块再解析
+                    pendingSequence = combined.substring(seqStart)
+                    if (pendingSequence.isNotEmpty()) {
+                        Log.d(TAG, "Deferring incomplete sequence (${pendingSequence.length} chars) to next chunk: firstChar=0x${(pendingSequence.first().code).toString(16)}")
+                    }
+                    break
                 }
                 null -> break
             }

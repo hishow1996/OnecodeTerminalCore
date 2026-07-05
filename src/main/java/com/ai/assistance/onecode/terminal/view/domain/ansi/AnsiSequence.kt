@@ -31,6 +31,9 @@ sealed class AnsiSequence {
     
     /** 未知或不支持的序列 */
     data class Unknown(val raw: String) : AnsiSequence()
+
+    // 输入流末尾仍未终结的转义序列。本次不解析，需等待后续块拼接后再处理。
+    object Incomplete : AnsiSequence()
 }
 
 /**
