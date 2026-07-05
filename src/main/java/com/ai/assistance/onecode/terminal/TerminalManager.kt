@@ -117,6 +117,29 @@ class TerminalManager private constructor(
         private const val UBUNTU_FILENAME = "ubuntu-noble-aarch64-pd-v4.18.0.tar.xz"
         private const val MAX_HISTORY_ITEMS = 500
         private const val MAX_OUTPUT_LINES_PER_ITEM = 1000
+
+        // UTF-8 单字符最多 4 字节，超出此长度的尾部不完整字节属于损坏流，直接丢弃以免无限累积
+        private const val MAX_LEFTOVER_BYTES = 8
+
+        // 返回 [0, length] 之间的分割点：[0..split) 是完整 UTF-8 字节，[split..length) 是末尾未成形的续字节，应留待下一块。
+        private fun trimIncompleteUtf8(bytes: ByteArray, length: Int): Int {
+            if (length == 0) return 0
+            var i = length - 1
+            // 回退跳过所有续字节 (10xxxxxx)
+            while (i >= 0 && (bytes[i].toInt() and 0xC0) == 0x80) i--
+            if (i < 0) return 0 // 整段都是续字节（损坏），全部留待下一块会被截断丢弃
+            val leadByte = bytes[i].toInt() and 0xFF
+            val expected = when {
+                (leadByte and 0x80) == 0x00 -> 1
+                (leadByte and 0xE0) == 0xC0 -> 2
+                (leadByte and 0xF0) == 0xE0 -> 3
+                (leadByte and 0xF8) == 0xF0 -> 4
+                else -> 1
+            }
+            val available = length - i
+            // 若末位引导字节声明要 expected 个字节但目前只读到 available 个，则不完整
+            return if (available < expected) i else length
+        }
     }
 
 
@@ -405,9 +428,39 @@ class TerminalManager private constructor(
                         terminalSession.stdout.use { inputStream ->
                             val buffer = ByteArray(4096)
                             var bytesRead: Int
+                            // 跨块 UTF-8 解码尾部缓冲：保留末尾被切断的多字节字符的引导字节/续字节，
+                            // 与下一块拼接后整体解码，杜绝 4096 字节边界把一个 CJK/制表符切成两个 U+FFFD。
+                            var leftover = ByteArray(0)
                             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                val chunk = String(buffer, 0, bytesRead)
+                                // 合并上一次的尾部续字节与本块
+                                var combined: ByteArray = if (leftover.isEmpty()) {
+                                    buffer.copyOfRange(0, bytesRead)
+                                } else {
+                                    leftover + buffer.copyOfRange(0, bytesRead)
+                                }
+                                val split = trimIncompleteUtf8(combined, combined.size)
+                                val trailing = combined.size - split
+                                when {
+                                    // 残留过长（损坏流）：不再保留，整块冲刷（不完整字节会被解码为 U+FFFD）
+                                    trailing > MAX_LEFTOVER_BYTES -> {
+                                        leftover = ByteArray(0)
+                                    }
+                                    // 末尾是不完整的多字节引导/续字节：截留到下一块拼接解码
+                                    split < combined.size -> {
+                                        leftover = combined.copyOfRange(split, combined.size)
+                                        combined = combined.copyOfRange(0, split)
+                                    }
+                                    // 末尾已是完整字符
+                                    else -> leftover = ByteArray(0)
+                                }
+                                val chunk = String(combined, 0, combined.size, Charsets.UTF_8)
                                 Log.d(TAG, "Read chunk: '$chunk'")
+                                outputProcessor.processOutput(sessionId, chunk, sessionManager)
+                            }
+                            // 流结束：冲刷残留（这些理论上拼不成合法字符，作为损坏流丢弃即可）
+                            if (leftover.isNotEmpty()) {
+                                val chunk = String(leftover, 0, leftover.size, Charsets.UTF_8)
+                                Log.d(TAG, "Flushing leftover chunk at EOF: '$chunk'")
                                 outputProcessor.processOutput(sessionId, chunk, sessionManager)
                             }
                         }
