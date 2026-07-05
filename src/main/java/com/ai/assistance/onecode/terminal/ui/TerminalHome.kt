@@ -172,6 +172,7 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .imePadding()
             ) {
                 // 终端输出区域 - 固定占剩余空间，不随键盘上移
                 CanvasTerminalScreen(
@@ -185,12 +186,11 @@ fun TerminalHome(
                     getScrollOffset = { id -> env.getScrollOffset(id) }
                 )
 
-                // 虚拟键盘 - 随 IME 上移
+                // 虚拟键盘 - 随外层 imePadding 一起上移
                 VirtualKeyboard(
                     onKeyPress = { key -> env.onSendInput(key, false) },
                     fontSize = fontSize * 0.85f,
-                    padding = padding * 0.7f,
-                    modifier = Modifier.imePadding()
+                    padding = padding * 0.7f
                 )
             }
         } else {
@@ -198,6 +198,7 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .imePadding()
             ) {
                 AndroidView(
                     factory = { context ->
@@ -276,13 +277,21 @@ fun TerminalHome(
                                 }
                             }
                         },
+                        // ⇄: opencode 运行中(alt screen)发送 Tab 切换 plan/build; 普通 shell 退出直输模式
+                        switchAction = if (env.isFullscreen) {
+                            { env.onSendInput("\t", false) }
+                        } else {
+                            {
+                                isDirectInputMode = false
+                                showVirtualKeyboard = false
+                                imeShown = false
+                            }
+                        },
                         fontSize = fontSize * 0.85f,
-                        padding = padding * 0.7f,
-                        modifier = Modifier.imePadding()
+                        padding = padding * 0.7f
                     )
                 } else {
-                    // 终端工具栏 + 输入行 随 IME 上移
-                    Column(modifier = Modifier.imePadding()) {
+                    // 终端工具栏
                     TerminalToolbar(
                         onInterrupt = env::onInterrupt,
                         onEnter = { env.onSendInput("\r", false) },
@@ -388,7 +397,6 @@ fun TerminalHome(
                             padding = padding * 0.7f
                         )
                     }
-                    } // 关闭 imePadding Column
                 }
             }
         }
@@ -816,7 +824,7 @@ private fun OrangeKeyButton(
         modifier = modifier
             .defaultMinSize(minHeight = 44.dp)
             .clickable { onClick() },
-        color = Color(0xFFFF8800),
+        color = Color(0xFFFF5500),
         shape = RoundedCornerShape(4.dp)
     ) {
         Box(
@@ -842,6 +850,7 @@ private fun DirectInputCompactBar(
     onInterrupt: () -> Unit,
     onExitDirectMode: () -> Unit,
     onToggleIme: () -> Unit,
+    switchAction: () -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     modifier: Modifier = Modifier
@@ -892,12 +901,34 @@ private fun DirectInputCompactBar(
                 OrangeKeyButton("⌨", onToggleIme, fontSize, padding, modifier = Modifier.weight(1f))
             }
 
-            // 第2行：⇄(发送Tab,plan/build切换)  CTRL  ALT  ←  ↓  →  PGDN  ⏎(橙)
+            // 第2行：⇄(按场景切换: opencode发Tab / 普通shell退出直输)  CTRL  ALT  ←  ↓  →  PGDN  ⏎(橙)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
-                KeyButton("⇄", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 44.dp)
+                        .clickable { switchAction() },
+                    color = Color(0xFF3A3A3A),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "⇄",
+                            color = Color.White,
+                            fontFamily = FontFamily.Default,
+                            fontSize = fontSize,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                }
                 ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
                 ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
                 KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
