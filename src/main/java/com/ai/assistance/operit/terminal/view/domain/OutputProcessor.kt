@@ -701,26 +701,29 @@ class OutputProcessor(
      */
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
-        
+
         // 构建欢迎消息，包含 ANSI 控制序列
         // \u001B[2J - 清屏（清除初始化过程中的所有输出）
         // \u001B[H - 移动光标到左上角
         // 使用 \r\n 确保正确换行（\r 回车到行首，\n 换到下一行）
+        // ANSI 256色: 250=浅灰色(one), 208=橙色(code)
         val welcomeMessage = "\u001B[2J\u001B[H" +
-            "  ___                   _ _   \r\n" +
-            " / _ \\ _ __   ___ _ __ (_) |_ \r\n" +
-            "| | | | '_ \\ / _ \\ '__ | | __|\r\n" +
-            "| |_| | |_) |  __/ |   | | |_ \r\n" +
-            " \\___/| .__/ \\___|_|   |_|\\__|\r\n" +
-            "      |_|                    \r\n" +
+            "\u001B[38;5;250m                      \u001B[38;5;208m              _      \u001B[0m\r\n" +
+            "\u001B[38;5;250m                      \u001B[38;5;208m             | |     \u001B[0m\r\n" +
+            "\u001B[38;5;250m      ___  _ __   ___ \u001B[38;5;208m ___ ___   __| | ___ \u001B[0m\r\n" +
+            "\u001B[38;5;250m     / _ \\| '_ \\ / _ \\\u001B[38;5;208m/ __/ _ \\ / _` |/ _ \\\u001B[0m\r\n" +
+            "\u001B[38;5;250m    | (_) | | | |  __/\u001B[38;5;208m (_| (_) | (_| |  __/\u001B[0m\r\n" +
+            "\u001B[38;5;250m     \\___/|_| |_|\\___|\u001B[38;5;208m\\___\\___/ \\__,_|\\___|\u001B[0m\r\n" +
+            "\u001B[38;5;250m                      \u001B[38;5;208m                     \u001B[0m\r\n" +
+            "\u001B[38;5;250m                      \u001B[38;5;208m                     \u001B[0m\r\n" +
             "\r\n" +
             "  >> Your portable Ubuntu environment on Android <<\r\n" +
             "\r\n"
-        
+
         // 直接发送到 ANSI 解析器（Canvas 渲染）
         // 清屏操作会清除之前初始化过程中的所有输出
         session.ansiParser.parse(welcomeMessage)
-        
+
         Log.d(TAG, "Screen cleared and welcome message sent to Canvas for session $sessionId")
     }
 
