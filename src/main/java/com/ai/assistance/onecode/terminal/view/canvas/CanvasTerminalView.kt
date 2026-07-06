@@ -1820,8 +1820,8 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 并扣除 RenderConfig 的左右/上下 padding，使 cols 与实际可绘制宽度严格一致：
         // opencode 按此 cols 排版的内容必然能完整显示在 [paddingLeft, width-paddingRight] 内，
         // 不再出现"右边内容丢失、必须缩到很小才能看完一行"的现象。
-        val availWidth = (width - config.paddingLeft - config.paddingRight).coerceAtLeast(textMetrics.charWidth.toInt().coerceAtLeast(1))
-        val availHeight = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(textMetrics.charHeight.toInt().coerceAtLeast(1))
+        val availWidth = (width - config.paddingLeft - config.paddingRight).coerceAtLeast(textMetrics.charWidth)
+        val availHeight = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(textMetrics.charHeight)
         val cols = (availWidth / textMetrics.charWidth).roundToInt().coerceAtLeast(1)
         val rows = (availHeight / textMetrics.charHeight).roundToInt().coerceAtLeast(1)
         
