@@ -738,6 +738,8 @@ class AnsiTerminalEmulator(
     fun getCursorX(): Int = cursorX
     fun getCursorY(): Int = cursorY
     fun isCursorVisible(): Boolean = cursorVisible
+    fun getScreenWidth(): Int = screenWidth
+    fun getScreenHeight(): Int = screenHeight
     
     fun getScreenContent(): Array<Array<TerminalChar>> = screenBuffer
     
