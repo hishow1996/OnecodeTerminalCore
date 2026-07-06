@@ -17,7 +17,10 @@ class GestureHandler(
     private val onScroll: (Float, Float) -> Unit,
     private val onFling: ((Float, Float) -> Unit)? = null,
     private val onDoubleTap: (Float, Float) -> Unit,
-    private val onLongPress: (Float, Float) -> Unit
+    private val onLongPress: (Float, Float) -> Unit,
+    // 缩放手势结束时的一次性回调：用于把积累的字号变化一次性同步给终端（resize + SIGWINCH），
+    // 避免在手势过程中每帧 resize/SIGWINCH 与 TUI 互相竞争产生错位。
+    private val onScaleEnd: (() -> Unit)? = null
 ) {
     private val scaleGestureDetector: ScaleGestureDetector
     private val gestureDetector: GestureDetector
@@ -40,6 +43,7 @@ class GestureHandler(
             
             override fun onScaleEnd(detector: ScaleGestureDetector) {
                 isScaling = false
+                onScaleEnd?.invoke()
             }
         })
         
