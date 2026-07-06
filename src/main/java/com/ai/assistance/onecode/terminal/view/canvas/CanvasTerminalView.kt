@@ -25,6 +25,7 @@ import com.ai.assistance.onecode.terminal.view.domain.ansi.AnsiTerminalEmulator
 import com.ai.assistance.onecode.terminal.view.domain.ansi.TerminalChar
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.abs
 import java.io.File
@@ -119,8 +120,10 @@ class CanvasTerminalView @JvmOverloads constructor(
     // 缩放因子
     private var scaleFactor = 1f
         set(value) {
+            // 仅跟手放大字号并重测字体指标、立即重绘；
+            // 不在此触发 updateTerminalSize（resize + SIGWINCH），那留给手势 onScaleEnd 一次性执行。
             field = value.coerceIn(0.5f, 3f)
-            updateFontSize()
+            reloadFontMetrics()
         }
     
     // 滚动偏移
@@ -236,6 +239,11 @@ class CanvasTerminalView @JvmOverloads constructor(
                 scaleFactor *= scale
                 requestRender()
             },
+            onScaleEnd = {
+                // 手势结束才一次性同步终端尺寸（resize + SIGWINCH）
+                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
+                requestRender()
+            },
             onScroll = { _, distanceY ->
                 if (!selectionManager.hasSelection()) {
                     // 手动滚动时停止惯性滚动
@@ -268,7 +276,8 @@ class CanvasTerminalView @JvmOverloads constructor(
                     val em = emulator ?: return@GestureHandler
                     val fullContent = em.getFullContent()
                     val charHeight = textMetrics.charHeight
-                    val maxScrollOffset = max(0f, fullContent.size * charHeight - height).toInt()
+                    val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
+                    val maxScrollOffset = max(0f, fullContent.size * charHeight - availH).toInt()
                     
                     scroller.fling(
                         0, scrollOffsetY.toInt(),  // 起始位置
@@ -434,9 +443,15 @@ class CanvasTerminalView @JvmOverloads constructor(
         gestureHandler = GestureHandler(
             context = context,
             onScale = { scale ->
+                // 手势过程中只跟手放大字号、即时重绘；不触发 resize + SIGWINCH，
+                // 避免每帧 resize 与 TUI 互相竞争导致 opencode 按陈旧列数排版、右边内容丢失。
                 scaleFactor *= scale
                 callback(scaleFactor)
-                // 更新字体指标和终端大小
+                requestRender()
+            },
+            onScaleEnd = {
+                // 手势结束才一次性把积累的字号同步给终端：resize emulator + setWindowSize(=SIGWINCH)，
+                // 让 opencode 收到稳定单一的新列数后自行清屏重绘。
                 updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
                 requestRender()
             },
@@ -472,7 +487,8 @@ class CanvasTerminalView @JvmOverloads constructor(
                     val em = emulator ?: return@GestureHandler
                     val fullContent = em.getFullContent()
                     val charHeight = textMetrics.charHeight
-                    val maxScrollOffset = max(0f, fullContent.size * charHeight - height).toInt()
+                    val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
+                    val maxScrollOffset = max(0f, fullContent.size * charHeight - availH).toInt()
                     
                     scroller.fling(
                         0, scrollOffsetY.toInt(),  // 起始位置
@@ -533,6 +549,16 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 这里可以保留用于缩放手势等场景
         textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
         updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
+        requestRender()
+    }
+
+    /**
+     * 仅按当前 scaleFactor 重测字体指标并请求重绘，不触发 updateTerminalSize。
+     * 给 pinch 跟手预览用：避免手势过程中每帧 resize + SIGWINCH 与 TUI 抢占导致错位。
+     * 真正的 resize + SIGWINCH 留到 [setScaleCallback] 的 onScaleEnd 一次性执行。
+     */
+    private fun reloadFontMetrics() {
+        textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
         requestRender()
     }
     
@@ -818,38 +844,46 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 1. 首先全屏清屏（防止前帧内容残留和闪烁）
         bgPaint.color = config.backgroundColor
         canvas.drawRect(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat(), bgPaint)
-        
-        // 限制最大滚动偏移（不能超过内容高度）
-        val maxScrollOffset = max(0f, fullContent.size * charHeight - canvas.height)
-        
-        // 如果需要滚动到底部，在渲染时执行（使用正确的 canvas.height）
+
+        // 渲染内边距（与 updateTerminalSize 计算 cols/rows 时扣减的 padding 保持一致），
+        // 让内容绘制在 [paddingLeft, width-paddingRight] x [paddingTop, height-paddingBottom] 内，
+        // cols*charWidth 即可贴合可视宽度，消除「横向字间均匀缝隙」与「右侧内容丢失」。
+        val padLeft = config.paddingLeft
+        val padTop = config.paddingTop
+        val availHeightCanvas = (canvas.height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
+        val availWidthCanvas = (canvas.width - config.paddingLeft - config.paddingRight).coerceAtLeast(charWidth)
+
+        // 限制最大滚动偏移（不能超过内容高度），以 availHeight 为准
+        val maxScrollOffset = max(0f, fullContent.size * charHeight - availHeightCanvas)
+
+        // 如果需要滚动到底部，在渲染时执行（使用正确的可用高度）
         if (needScrollToBottom) {
             scrollOffsetY = maxScrollOffset
             needScrollToBottom = false
         }
-        
+
         scrollOffsetY = scrollOffsetY.coerceIn(0f, maxScrollOffset)
-        
+
         // 计算可见区域
-        val visibleRows = (canvas.height / charHeight).toInt() + 1
+        val visibleRows = (availHeightCanvas / charHeight).toInt() + 1
         val startRow = (scrollOffsetY / charHeight).toInt()
         val endRow = min(startRow + visibleRows, fullContent.size)
-        
+
 
         // 绘制每一行（包括背景）
         var drawnCharCount = 0
         for (row in startRow until endRow) {
             if (row >= fullContent.size) break
-            
+
             val line = fullContent[row]
             drawnCharCount += line.size
-            
-            // 使用绝对坐标计算，避免 startRow 跳变导致的整体偏移
-            val exactY = row * charHeight - scrollOffsetY
+
+            // 使用绝对坐标计算，避免 startRow 跳变导致的整体偏移；纵向加 paddingTop 留白
+            val exactY = row * charHeight - scrollOffsetY + padTop
             val y = kotlin.math.round(exactY)
-            
-            // 绘制该行的所有字符
-            drawLine(canvas, line, row, 0f, y, charWidth, charHeight, baseline)
+
+            // 绘制该行的所有字符；横向起点为 paddingLeft，使 cols 与可视宽度对齐
+            drawLine(canvas, line, row, padLeft, y, charWidth, charHeight, baseline)
         }
         
         // 绘制选择区域
@@ -864,12 +898,12 @@ class CanvasTerminalView @JvmOverloads constructor(
             
             // 只有当光标在可见区域内时才绘制
             if (cursorRow >= startRow && cursorRow < endRow) {
-                val exactCursorY = cursorRow * charHeight - scrollOffsetY
+                val exactCursorY = cursorRow * charHeight - scrollOffsetY + padTop
                 val cursorY = kotlin.math.round(exactCursorY)
                 
-                // 计算光标的 x 坐标，考虑宽字符
+                // 计算光标的 x 坐标，考虑宽字符；起点加 paddingLeft 与正文对齐
                 val line = fullContent.getOrNull(cursorRow) ?: arrayOf()
-                var cursorX = 0f
+                var cursorX = padLeft
                 
                 // 遍历到光标列，累加每个字符的宽度
                 for (col in 0 until cursorCol.coerceAtMost(line.size)) {
@@ -1111,9 +1145,11 @@ class CanvasTerminalView @JvmOverloads constructor(
         val selection = selectionManager.selection?.normalize() ?: return
         val em = emulator ?: return
         val fullContent = em.getFullContent()
-        
+        val padLeft = config.paddingLeft
+        val padTop = config.paddingTop
+
         for (row in selection.startRow..selection.endRow) {
-            val exactY = row * charHeight - scrollOffsetY
+            val exactY = row * charHeight - scrollOffsetY + padTop
             val y = kotlin.math.round(exactY)
             
             val startCol = if (row == selection.startRow) selection.startCol else 0
@@ -1124,15 +1160,15 @@ class CanvasTerminalView @JvmOverloads constructor(
             }
             
             val line = fullContent.getOrNull(row) ?: continue
-            var x1 = 0f
-            var x2 = 0f
+            var x1 = padLeft
+            var x2 = padLeft
             
             for (col in 0 until startCol.coerceAtMost(line.size)) {
                 val cellWidth = textMetrics.getCellWidth(line[col].char)
                 x1 += charWidth * cellWidth
             }
-            
-            for (col in 0..endCol.coerceAtMost(line.size - 1)) {
+            x2 = x1
+            for (col in startCol..endCol.coerceAtMost(line.size - 1)) {
                 val cellWidth = textMetrics.getCellWidth(line[col].char)
                 x2 += charWidth * cellWidth
             }
@@ -1144,23 +1180,23 @@ class CanvasTerminalView @JvmOverloads constructor(
         val handleLineHeight = charHeight * 0.6f
         
         val startLine = fullContent.getOrNull(selection.startRow) ?: return
-        var startX = 0f
+        var startX = padLeft
         for (col in 0 until selection.startCol.coerceAtMost(startLine.size)) {
             val cellWidth = textMetrics.getCellWidth(startLine[col].char)
             startX += charWidth * cellWidth
         }
-        val startY = selection.startRow * charHeight - scrollOffsetY
+        val startY = selection.startRow * charHeight - scrollOffsetY + padTop
         canvas.drawRect(startX - handleRadius / 2, startY, startX + handleRadius / 2, startY + handleLineHeight, handlePaint)
         canvas.drawCircle(startX, startY + handleLineHeight + handleRadius, handleRadius, handlePaint)
         canvas.drawCircle(startX, startY + handleLineHeight + handleRadius, handleRadius, handleStrokePaint)
         
         val endLine = fullContent.getOrNull(selection.endRow) ?: return
-        var endX = 0f
+        var endX = padLeft
         for (col in 0..selection.endCol.coerceAtMost(endLine.size - 1)) {
             val cellWidth = textMetrics.getCellWidth(endLine[col].char)
             endX += charWidth * cellWidth
         }
-        val endY = selection.endRow * charHeight - scrollOffsetY + charHeight
+        val endY = selection.endRow * charHeight - scrollOffsetY + padTop + charHeight
         canvas.drawRect(endX - handleRadius / 2, endY - handleLineHeight, endX + handleRadius / 2, endY, handlePaint)
         canvas.drawCircle(endX, endY - handleLineHeight - handleRadius, handleRadius, handlePaint)
         canvas.drawCircle(endX, endY - handleLineHeight - handleRadius, handleRadius, handleStrokePaint)
@@ -1176,20 +1212,20 @@ class CanvasTerminalView @JvmOverloads constructor(
         val handleLineHeight = charHeight * 0.6f
         
         val startLine = fullContent.getOrNull(selection.startRow) ?: return null
-        var startX = 0f
+        var startX = config.paddingLeft
         for (col in 0 until selection.startCol.coerceAtMost(startLine.size)) {
             val cellWidth = textMetrics.getCellWidth(startLine[col].char)
             startX += charWidth * cellWidth
         }
-        val startY = selection.startRow * charHeight - scrollOffsetY + handleLineHeight + handleRadius
+        val startY = selection.startRow * charHeight - scrollOffsetY + config.paddingTop + handleLineHeight + handleRadius
         
         val endLine = fullContent.getOrNull(selection.endRow) ?: return null
-        var endX = 0f
+        var endX = config.paddingLeft
         for (col in 0..selection.endCol.coerceAtMost(endLine.size - 1)) {
             val cellWidth = textMetrics.getCellWidth(endLine[col].char)
             endX += charWidth * cellWidth
         }
-        val endY = selection.endRow * charHeight - scrollOffsetY + charHeight - handleLineHeight - handleRadius
+        val endY = selection.endRow * charHeight - scrollOffsetY + config.paddingTop + charHeight - handleLineHeight - handleRadius
         
         return Pair(Pair(startX, startY), Pair(endX, endY))
     }
@@ -1354,7 +1390,10 @@ class CanvasTerminalView @JvmOverloads constructor(
     private fun screenToTerminalCoords(x: Float, y: Float): Pair<Int, Int> {
         val em = emulator ?: return Pair(0, 0)
         val fullContent = em.getFullContent()
-        val row = ((y + scrollOffsetY) / textMetrics.charHeight).toInt().coerceIn(0, fullContent.size - 1)
+        // 触摸坐标含内边距，还原到终端坐标空间
+        val tx = x - config.paddingLeft
+        val ty = y - config.paddingTop + scrollOffsetY
+        val row = (ty / textMetrics.charHeight).toInt().coerceIn(0, fullContent.size - 1)
         
         // 获取该行的内容
         val line = fullContent.getOrNull(row) ?: return Pair(row, 0)
@@ -1368,11 +1407,11 @@ class CanvasTerminalView @JvmOverloads constructor(
             val cellWidth = textMetrics.getCellWidth(line[i].char)
             val actualCharWidth = charWidth * cellWidth
             
-            if (x < currentX + actualCharWidth / 2) {
+            if (tx < currentX + actualCharWidth / 2) {
                 // 点击位置在这个字符的前半部分
                 col = i
                 break
-            } else if (x < currentX + actualCharWidth) {
+            } else if (tx < currentX + actualCharWidth) {
                 // 点击位置在这个字符的后半部分（宽字符）
                 col = i
                 break
@@ -1777,9 +1816,14 @@ class CanvasTerminalView @JvmOverloads constructor(
         textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
 
         // 计算终端尺寸（行和列）
-        // 现在终端模拟器支持重排，可以正常根据字体大小调整列数
-        val cols = (width / textMetrics.charWidth).toInt().coerceAtLeast(1)
-        val rows = (height / textMetrics.charHeight).toInt().coerceAtLeast(1)
+        // 用 roundToInt（而非 toInt=floor）让 cols*charWidth 尽量贴满可视宽度，
+        // 并扣除 RenderConfig 的左右/上下 padding，使 cols 与实际可绘制宽度严格一致：
+        // opencode 按此 cols 排版的内容必然能完整显示在 [paddingLeft, width-paddingRight] 内，
+        // 不再出现"右边内容丢失、必须缩到很小才能看完一行"的现象。
+        val availWidth = (width - config.paddingLeft - config.paddingRight).coerceAtLeast(textMetrics.charWidth.toInt().coerceAtLeast(1))
+        val availHeight = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(textMetrics.charHeight.toInt().coerceAtLeast(1))
+        val cols = (availWidth / textMetrics.charWidth).roundToInt().coerceAtLeast(1)
+        val rows = (availHeight / textMetrics.charHeight).roundToInt().coerceAtLeast(1)
         
         // 只有当尺寸真正发生变化时才更新
         if (rows == cachedRows && cols == cachedCols) {
@@ -1793,12 +1837,13 @@ class CanvasTerminalView @JvmOverloads constructor(
         emulator?.resize(cols, rows)
         
         // 2. 恢复滚动位置
-        // 使用新的行高计算新的像素偏移量
+        // 使用新的行高计算新的像素偏移量（与 drawTerminal 一致，用扣过 padding 的可用高度）
         if (emulator != null) {
             val newCharHeight = textMetrics.charHeight
+            val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(newCharHeight)
             // 重新计算最大滚动范围
             val fullContentSize = emulator?.getFullContent()?.size ?: 0
-            val maxScrollOffset = max(0f, fullContentSize * newCharHeight - height)
+            val maxScrollOffset = max(0f, fullContentSize * newCharHeight - availH)
             
             // 恢复之前的行位置
             scrollOffsetY = (currentScrollRows * newCharHeight).coerceIn(0f, maxScrollOffset)

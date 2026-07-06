@@ -771,7 +771,17 @@ class AnsiTerminalEmulator(
     
     fun resize(newWidth: Int, newHeight: Int) {
         if (newWidth == screenWidth && newHeight == screenHeight) return
-        
+
+        // 备用屏（如 opencode 这类全屏 TUI）不参与主屏的 reflow：TUI 自己用光标定位绘制，
+        // 主屏式的「软换行合并/去尾空白/光标移到底」会把它二次重排并错位。这里只按新尺寸
+        // 原样截断或填充，光标就地钳制；交给 TUI 收到 SIGWINCH 后自行清屏重绘。
+        if (isAltScreenActive) {
+            resizeAltScreen(newWidth, newHeight)
+            notifyChange()
+            return
+        }
+
+        // 主屏：reflow 保留历史滚动
         // 主流程：收集 -> 清理 -> 重排 -> 分配
         val logicalLines = collectLogicalLines()
         trimTrailingEmptyLines(logicalLines)
@@ -789,7 +799,32 @@ class AnsiTerminalEmulator(
         
         notifyChange()
     }
-    
+
+    /**
+     * 备用屏专用 resize：不参与主屏的 reflow。
+     * 只按新尺寸原样截断/填充缓冲，光标就地钳制，软换行标记清零，
+     * 把布局交给 TUI 自己在收到 SIGWINCH 后清屏重绘，避免主屏式重排把
+     * 用光标定位画好的 TUI 内容二次折行/去尾空白/移光标到底而错位。
+     */
+    private fun resizeAltScreen(newWidth: Int, newHeight: Int) {
+        val newBuffer = Array(newHeight) { Array(newWidth) { TerminalChar() } }
+        val copyHeight = minOf(screenHeight, newHeight)
+        val copyWidth = minOf(screenWidth, newWidth)
+        for (y in 0 until copyHeight) {
+            for (x in 0 until copyWidth) {
+                newBuffer[y][x] = screenBuffer[y][x]
+            }
+        }
+        screenBuffer = newBuffer
+        lineWrapped = BooleanArray(newHeight) { false }
+        screenWidth = newWidth
+        screenHeight = newHeight
+        scrollTop = 0
+        scrollBottom = screenHeight - 1
+        cursorX = cursorX.coerceIn(0, (screenWidth - 1).coerceAtLeast(0))
+        cursorY = cursorY.coerceIn(0, (screenHeight - 1).coerceAtLeast(0))
+    }
+
     /**
      * 收集所有逻辑行（合并历史+屏幕的软换行）
      */
