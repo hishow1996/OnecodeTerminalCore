@@ -622,29 +622,37 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // 构建欢迎消息，包含 ANSI 控制序列
-        // \u001B[2J - 清屏（清除初始化过程中的所有输出）
-        // \u001B[H - 移动光标到左上角
-        // 使用 \r\n 确保正确换行（\r 回车到行首，\n 换到下一行）
-        // ANSI 256 色: 250=浅灰色(one), 208=橙色(code)，居中显示 OneCode
-        val welcomeMessage = "\u001B[2J\u001B[H" +
-            "\u001B[38;5;250m                      \u001B[38;5;208m              _      \u001B[0m\r\n" +
-            "\u001B[38;5;250m                      \u001B[38;5;208m             | |     \u001B[0m\r\n" +
-            "\u001B[38;5;250m      ___  _ __   ___ \u001B[38;5;208m ___ ___   __| | ___ \u001B[0m\r\n" +
-            "\u001B[38;5;250m     / _ \\| '_ \\ / _ \\\u001B[38;5;208m/ __/ _ \\ / _` |/ _ \\\u001B[0m\r\n" +
-            "\u001B[38;5;250m    | (_) | | | |  __/\u001B[38;5;208m (_| (_) | (_| |  __/\u001B[0m\r\n" +
-            "\u001B[38;5;250m     \\___/|_| |_|\\___|\u001B[38;5;208m\\___\\___/ \\__,_|\\___|\u001B[0m\r\n" +
-            "\u001B[38;5;250m                      \u001B[38;5;208m                     \u001B[0m\r\n" +
-            "\u001B[38;5;250m                      \u001B[38;5;208m                     \u001B[0m\r\n" +
-            "\r\n" +
-            "  >> Your portable Ubuntu environment on Android <<\r\n" +
-            "\r\n"
+        // ANSI 256 色: 250=浅灰色(one), 208=橙色(code)
+        // 6 行 OneCode 双色 ASCII art（去掉原版末尾两行纯空白装饰让上下更紧凑）。
+        // 按运行时实际列数动态居中，避免硬编码 80 列前导空格在窄屏越界换行
+        // 产生残影/虚线、不居中、多出长条空白。
+        val artLines = listOf(
+            "\u001B[38;5;250m            \u001B[38;5;208m              _      \u001B[0m",
+            "\u001B[38;5;250m            \u001B[38;5;208m             | |     \u001B[0m",
+            "\u001B[38;5;250m      ___  _ __   ___ \u001B[38;5;208m ___ ___   __| | ___ \u001B[0m",
+            "\u001B[38;5;250m     / _ \\| '_ \\ / _ \\\u001B[38;5;208m/ __/ _ \\ / _` |/ _ \\\u001B[0m",
+            "\u001B[38;5;250m    | (_) | | | |  __/\u001B[38;5;208m (_| (_) | (_| |  __/\u001B[0m",
+            "\u001B[38;5;250m     \\___/|_| |_|\\___|\u001B[38;5;208m\\___\\___/ \\__,_|\\___|\u001B[0m"
+        )
+        // 去除 ANSI 序列后的可见字符宽度
+        val ansiRegex = Regex("\u001B\\[[0-9;]*m")
+        val artWidth = artLines.maxOf { it.replace(ansiRegex, "").length }
+        val screenWidth = session.ansiParser.getScreenWidth()
+        val prefix = if (screenWidth > artWidth) (screenWidth - artWidth) / 2 else 0
+        val pad = " ".repeat(prefix)
+        
+        val sb = StringBuilder("\u001B[2J\u001B[H")
+        for (line in artLines) {
+            sb.append(pad).append(line).append("\r\n")
+        }
+        sb.append("\r\n")
+        sb.append("  >> Your portable Ubuntu environment on Android <<\r\n")
         
         // 直接发送到 ANSI 解析器（Canvas 渲染）
         // 清屏操作会清除之前初始化过程中的所有输出
-        session.ansiParser.parse(welcomeMessage)
+        session.ansiParser.parse(sb.toString())
         
-        Log.d(TAG, "Screen cleared and welcome message sent to Canvas for session $sessionId")
+        Log.d(TAG, "Welcome message sent (sw=$screenWidth, artWidth=$artWidth, prefix=$prefix) for session $sessionId")
     }
 
 }
