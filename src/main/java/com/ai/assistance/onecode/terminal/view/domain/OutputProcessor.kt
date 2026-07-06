@@ -622,20 +622,69 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // ANSI 256 色: 250=浅灰色(one), 208=橙色(code)
-        // 6 行 OneCode 双色 ASCII art（去掉原版末尾两行纯空白装饰让上下更紧凑）。
-        // 按运行时实际列数动态居中，避免硬编码 80 列前导空格在窄屏越界换行
-        // 产生残影/虚线、不居中、多出长条空白。
-        val artLines = listOf(
-            "\u001B[38;5;250m            \u001B[38;5;208m              _      \u001B[0m",
-            "\u001B[38;5;250m            \u001B[38;5;208m             | |     \u001B[0m",
-            "\u001B[38;5;250m      ___  _ __   ___ \u001B[38;5;208m ___ ___   __| | ___ \u001B[0m",
-            "\u001B[38;5;250m     / _ \\| '_ \\ / _ \\\u001B[38;5;208m/ __/ _ \\ / _` |/ _ \\\u001B[0m",
-            "\u001B[38;5;250m    | (_) | | | |  __/\u001B[38;5;208m (_| (_) | (_| |  __/\u001B[0m",
-            "\u001B[38;5;250m     \\___/|_| |_|\\___|\u001B[38;5;208m\\___\\___/ \\__,_|\\___|\u001B[0m"
+        // 6 行 x 5 列逐字像素艺术字模，重组为 "onecode"；
+        // one(浅灰 250) + code(橙 208)。字符填充使用 U+2588 (█) 实心方块，
+        // JetBrains Mono Nerd Font 默认支持。
+        // 按运行时的屏幕列数动态前置空格 `(sw - artWidth) / 2` 居中；
+        // 窄屏 prefix=0 左对齐，避免越界换行产生残影/虚线。
+        val glyphs = mapOf(
+            'o' to listOf(
+                " ███ ",
+                "█   █",
+                "█   █",
+                "█   █",
+                " ███ ",
+                "     "
+            ),
+            'n' to listOf(
+                "█   █",
+                "██  █",
+                "█ █ █",
+                "█  ██",
+                "█   █",
+                "█   █"
+            ),
+            'e' to listOf(
+                "█████",
+                "█    ",
+                "████ ",
+                "█    ",
+                "█████",
+                "     "
+            ),
+            'c' to listOf(
+                " ████",
+                "█    ",
+                "█    ",
+                "█    ",
+                " ████",
+                "     "
+            ),
+            'd' to listOf(
+                "█    ",
+                "██  █",
+                "█ █ █",
+                "█  ██",
+                "██  █",
+                "█    "
+            )
         )
-        // 去除 ANSI 序列后的可见字符宽度
+        val text = "onecode"
+        val sep = " "
+        val height = 6
         val ansiRegex = Regex("\u001B\\[[0-9;]*m")
+        // 逐行拼装：每个字符 glyph 套上对应颜色（one 0..2 灰、code 3..6 橙），以单 cell 间隔分隔
+        val artLines = List(height) { row ->
+            val sb = StringBuilder()
+            text.forEachIndexed { i, ch ->
+                if (i > 0) sb.append(sep)
+                val glyph = glyphs[ch]?.get(row) ?: "     "
+                val color = if (i < 3) "\u001B[38;5;250m" else "\u001B[38;5;208m"
+                sb.append(color).append(glyph).append("\u001B[0m")
+            }
+            sb.toString()
+        }
+        // art 实际可见宽度（去除 ANSI 序列后，最长一行字符数）
         val artWidth = artLines.maxOf { it.replace(ansiRegex, "").length }
         val screenWidth = session.ansiParser.getScreenWidth()
         val prefix = if (screenWidth > artWidth) (screenWidth - artWidth) / 2 else 0
