@@ -622,56 +622,51 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // 6 行 x 4 列逐字像素艺术字模，重组为 "onecode"；
-        // one(浅灰 250) + code(橙 208)。字符填充使用 U+2588 (█) 实心方块。
-        // 比之前的 5 列字模等比缩窄，总宽从 41 降到 34，给屏幕边缘留出完美呼吸留白。
-        // 按运行时的屏幕列数动态前置空格 `(sw - artWidth) / 2` 居中；
-        // 窄屏 prefix=0 左对齐，避免越界换行产生残影/虚线。
+        // 5 行 x 4 列逐字像素艺术字模，重组为 "onecode"；
+        // one(浅灰 250) + code(橙 208)。使用 U+2588 (█) 画左右竖线与右长竖；
+        // 使用 U+2580 (▀)、U+2584 (▄) 半角方块画横线（高度仅 0.5 cell），
+        // 物理上实现横竖线条粗细 1:1 完全一致，消除"横粗竖细"与"字被拉长"两个痛点。
+        // 总宽 34 列（4×7 + 6），左右两侧自动留出 3-5 列呼吸空白。
         val glyphs = mapOf(
             'o' to listOf(
-                " ██ ",
+                " ▀▀ ",
                 "█  █",
                 "█  █",
-                "█  █",
-                " ██ ",
+                " ▄▄ ",
                 "    "
             ),
             'n' to listOf(
-                "███ ",
-                "█  █",
+                " ▀▀ ",
                 "█  █",
                 "█  █",
                 "█  █",
                 "    "
             ),
             'e' to listOf(
-                " ██ ",
-                "█  █",
-                "████",
+                " ▀▀ ",
+                "█▀▀█",
                 "█   ",
-                " ██ ",
+                " ▄▄ ",
                 "    "
             ),
             'c' to listOf(
-                " ██ ",
+                " ▀▀ ",
                 "█   ",
                 "█   ",
-                "█   ",
-                " ██ ",
+                " ▄▄ ",
                 "    "
             ),
             'd' to listOf(
                 "   █",
-                " ███",
+                " ▀▀█",
                 "█  █",
-                "█  █",
-                " ███",
+                " ▄▄█",
                 "    "
             )
         )
         val text = "onecode"
         val sep = " "
-        val height = 6
+        val height = 5
         val ansiRegex = Regex("\u001B\\[[0-9;]*m")
         // 逐行拼装：每个字符 glyph 套上对应颜色（one 0..2 灰、code 3..6 橙），以单 cell 间隔分隔
         val artLines = List(height) { row ->
