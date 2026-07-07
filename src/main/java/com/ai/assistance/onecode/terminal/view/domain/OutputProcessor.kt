@@ -622,51 +622,51 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // 6 行 x 5 列逐字像素艺术字模，重组为 "onecode"；
-        // one(浅灰 250) + code(橙 208)。字符填充使用 U+2588 (█) 实心方块，
-        // JetBrains Mono Nerd Font 默认支持。
+        // 6 行 x 4 列逐字像素艺术字模，重组为 "onecode"；
+        // one(浅灰 250) + code(橙 208)。字符填充使用 U+2588 (█) 实心方块。
+        // 比之前的 5 列字模等比缩窄，总宽从 41 降到 34，给屏幕边缘留出完美呼吸留白。
         // 按运行时的屏幕列数动态前置空格 `(sw - artWidth) / 2` 居中；
         // 窄屏 prefix=0 左对齐，避免越界换行产生残影/虚线。
         val glyphs = mapOf(
             'o' to listOf(
-                " ███ ",
-                "█   █",
-                "█   █",
-                "█   █",
-                " ███ ",
-                "     "
+                " ██ ",
+                "█  █",
+                "█  █",
+                "█  █",
+                " ██ ",
+                "    "
             ),
             'n' to listOf(
-                "████ ",
-                "█   █",
-                "█   █",
-                "█   █",
-                "█   █",
-                "     "
+                "███ ",
+                "█  █",
+                "█  █",
+                "█  █",
+                "█  █",
+                "    "
             ),
             'e' to listOf(
-                " ███ ",
-                "█   █",
-                "█████",
-                "█    ",
-                " ███ ",
-                "     "
+                " ██ ",
+                "█  █",
+                "████",
+                "█   ",
+                " ██ ",
+                "    "
             ),
             'c' to listOf(
-                " ███ ",
-                "█    ",
-                "█    ",
-                "█    ",
-                " ███ ",
-                "     "
+                " ██ ",
+                "█   ",
+                "█   ",
+                "█   ",
+                " ██ ",
+                "    "
             ),
             'd' to listOf(
-                "    █",
-                " ████",
-                "█   █",
-                "█   █",
-                " ████",
-                "     "
+                "   █",
+                " ███",
+                "█  █",
+                "█  █",
+                " ███",
+                "    "
             )
         )
         val text = "onecode"
