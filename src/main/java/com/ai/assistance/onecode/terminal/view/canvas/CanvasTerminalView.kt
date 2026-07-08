@@ -4,8 +4,9 @@ import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.graphics.SurfaceTexture
+import android.view.TextureView
+import android.view.Surface
 import android.util.Log
 import android.view.ActionMode
 import android.view.Menu
@@ -33,13 +34,15 @@ import com.ai.assistance.onecode.terminal.R
 
 /**
  * 基于Canvas的高性能终端视图
- * 使用SurfaceView + 独立渲染线程实现
+ * 使用TextureView + 独立渲染线程实现
+ * TextureView 渲染在 View 层级中（无独立窗口），随布局/键盘动画同步移动，
+ * 从根源上消除 SurfaceView 的"内容闪现两次/重影"问题。
  */
 class CanvasTerminalView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : SurfaceView(context, attrs, defStyleAttr), SurfaceHolder.Callback {
+) : TextureView(context, attrs, defStyleAttr), TextureView.SurfaceTextureListener {
     
     // 渲染配置
     private var config = RenderConfig()
@@ -101,7 +104,11 @@ class CanvasTerminalView @JvmOverloads constructor(
     
     // PTY 引用（用于窗口大小同步）
     private var pty: com.ai.assistance.onecode.terminal.Pty? = null
-    
+
+    // TextureView 的 Surface（从 SurfaceTexture 创建）
+    @Volatile
+    private var surface: Surface? = null
+
     // 渲染线程
     private var renderThread: RenderThread? = null
     private val renderLock = ReentrantLock()
@@ -183,9 +190,9 @@ class CanvasTerminalView @JvmOverloads constructor(
     private val terminalAccessibilityDelegate: TerminalAccessibilityDelegate
     
     init {
-        holder.addCallback(this)
+        surfaceTextureListener = this
         setWillNotDraw(false)
-        
+
         // 使视图可以获得焦点以接收输入法输入
         isFocusable = true
         isFocusableInTouchMode = true
@@ -211,8 +218,7 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 重要：启用accessibility以让系统识别虚拟节点
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
         
-        // 回退：移除可能导致卡顿的 ZOrderMediaOverlay 设置
-        // 保持默认的 SurfaceView 行为
+        // TextureView 渲染在 View 层级中，无需 Z-order 设置
     }
 
     private fun isAccessibilityEnabled(): Boolean {
@@ -256,7 +262,7 @@ class CanvasTerminalView @JvmOverloads constructor(
             },
             onScaleEnd = {
                 // 手势结束才一次性同步终端尺寸（resize + SIGWINCH），即时生效
-                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
+                updateTerminalSize(width, height, immediate = true)
                 requestRender()
             },
             onScroll = { _, distanceY ->
@@ -467,7 +473,7 @@ class CanvasTerminalView @JvmOverloads constructor(
             onScaleEnd = {
                 // 手势结束才一次性把积累的字号同步给终端：resize emulator + setWindowSize(=SIGWINCH)，
                 // 让 opencode 收到稳定单一的新列数后自行清屏重绘。即时生效，不等去抖。
-                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
+                updateTerminalSize(width, height, immediate = true)
                 requestRender()
             },
             onScroll = { _, distanceY ->
@@ -548,7 +554,7 @@ class CanvasTerminalView @JvmOverloads constructor(
             oldFontSize != newConfig.fontSize
         ) {
             loadAndApplyFont()
-            updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
+            updateTerminalSize(width, height, immediate = true)
             requestRender()
         } else {
             // 其他配置改变，也需要重新渲染
@@ -563,7 +569,7 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 字体大小的更新现在由 textMetrics.updateFromRenderConfig 处理
         // 这里可以保留用于缩放手势等场景
         textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
-        updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
+        updateTerminalSize(width, height, immediate = true)
         requestRender()
     }
 
@@ -584,26 +590,21 @@ class CanvasTerminalView @JvmOverloads constructor(
         isDirty = true
     }
     
-    // === SurfaceHolder.Callback 实现 ===
-    
+    // === TextureView.SurfaceTextureListener 实现 ===
+
     // 防止死循环的上次重建时间
     private var lastRecreateTime = 0L
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         Log.d("CanvasTerminalView", "onSizeChanged: ${w}x${h} (old: ${oldw}x${oldh})")
-        
-        // 从无效尺寸变为有效尺寸（0x0 -> 正常）：典型场景是键盘呼出/隐藏导致的高度变化。
-        // 旧实现通过 GONE->VISIBLE 强制重建 Surface 来"治"黑屏，但序列中的 GONE 帧会让
-        // SurfaceView 透明、露出底下旧内容，紧接着新 Surface 在新位置重绘，
-        // 上下移动时即出现"快速闪现的第二次内容"。这里改为不清重建、只确保渲染线程
-        // 在跑并请求一帧重绘（drawTerminal 开头会全屏清背景，足以覆盖残留旧帧），
-        // 既不破坏 Surface、也不在 IME 动画中途触发 Surface 重建，从而消除闪现。
+
+        // TextureView 随 View 层级同步移动，不再需要 GONE->VISIBLE 重建 Surface 的旧逻辑。
         if (w > 0 && h > 0 && (oldw <= 0 || oldh <= 0)) {
             cachedRows = 0
             cachedCols = 0
             Log.d("CanvasTerminalView", "onSizeChanged: Cleared terminal size cache due to 0->Normal transition")
-            if (holder.surface.isValid && (renderThread == null || !renderThread!!.isAlive)) {
+            if (surface?.isValid == true && (renderThread == null || !renderThread!!.isAlive)) {
                 startRenderThread()
             }
             synchronized(pauseLock) { isPaused = false; pauseLock.notifyAll() }
@@ -615,13 +616,13 @@ class CanvasTerminalView @JvmOverloads constructor(
             stopRenderThread()
             synchronized(pauseLock) { isPaused = true }
         } else {
-            // 如果线程不存在（之前被销毁了），这里不急着启动，交给 surfaceChanged 统一处理
+            // 如果线程不存在（之前被销毁了），这里不急着启动，交给 onSurfaceTextureSizeChanged 统一处理
             // 只是确保 pause 状态解除
-            synchronized(pauseLock) { 
+            synchronized(pauseLock) {
                 isPaused = false
                 pauseLock.notifyAll()
             }
-            
+
             // 尺寸发生变化时，重新计算并同步终端大小到 PTY
             // 这样可以确保终端窗口大小与 View 大小保持一致
             if (oldw != w || oldh != h) {
@@ -630,67 +631,80 @@ class CanvasTerminalView @JvmOverloads constructor(
             }
         }
     }
-    
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        Log.d("CanvasTerminalView", "surfaceCreated")
-        // surfaceCreated 时如果尺寸未知或为0，startRenderThread 会被调用但 run 循环会等待
-        // 但为了安全，我们尽量由 surfaceChanged 驱动
+
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        Log.d("CanvasTerminalView", "onSurfaceTextureAvailable: ${width}x${height}")
+        // 如果存在旧 Surface（如 SurfaceTexture 被重建），先释放
+        this.surface?.release()
+        this.surface = Surface(surface)
         if (width > 0 && height > 0) {
             startRenderThread()
         }
     }
-    
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        Log.d("CanvasTerminalView", "surfaceChanged: ${width}x${height}")
-        
+
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        Log.d("CanvasTerminalView", "onSurfaceTextureSizeChanged: ${width}x${height}")
+
         // 如果尺寸无效，停止渲染
         if (width <= 0 || height <= 0) {
-            Log.d("CanvasTerminalView", "surfaceChanged: Invalid size, stopping render thread")
+            Log.d("CanvasTerminalView", "onSurfaceTextureSizeChanged: Invalid size, stopping render thread")
             stopRenderThread()
             synchronized(pauseLock) {
                 isPaused = true
             }
             return
         }
-        
+
         // 恢复状态
         synchronized(pauseLock) {
             isPaused = false
             pauseLock.notifyAll()
         }
-        
+
         // 确保线程运行
         if (renderThread == null || !renderThread!!.isAlive) {
-            Log.d("CanvasTerminalView", "surfaceChanged: Starting render thread for valid size")
+            Log.d("CanvasTerminalView", "onSurfaceTextureSizeChanged: Starting render thread for valid size")
             startRenderThread()
         }
 
         // 更新终端窗口大小
         updateTerminalSize(width, height)
-        
+
         requestRender()
     }
-    
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
-        Log.d("CanvasTerminalView", "surfaceDestroyed")
+
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        Log.d("CanvasTerminalView", "onSurfaceTextureDestroyed")
         stopRenderThread()
         // 清理方向键长按回调，避免内存泄漏
         handleArrowKeyUp()
+        this.surface?.release()
+        this.surface = null
+        return true
     }
-    
+
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        // 由 TextureView 在 surface 内容更新时调用，此处无需处理
+    }
+
     // === 渲染线程 ===
-    
+
     private fun startRenderThread() {
         Log.d("CanvasTerminalView", "startRenderThread: Starting new thread")
         stopRenderThread()
-        renderThread = RenderThread(holder).apply {
+        val sf = surface
+        if (sf == null) {
+            Log.w("CanvasTerminalView", "startRenderThread: surface is null, aborting")
+            return
+        }
+        renderThread = RenderThread(sf).apply {
             start()
         }
     }
-    
+
     /**
      * 停止渲染线程
-     * 在视图被销毁或移除时调用，避免SurfaceView锁竞争导致ANR
+     * 在视图被销毁或移除时调用，避免渲染线程竞争已销毁的 Surface 导致 ANR
      */
     fun stopRenderThread() {
         Log.d("CanvasTerminalView", "stopRenderThread: Stopping thread")
@@ -708,8 +722,8 @@ class CanvasTerminalView @JvmOverloads constructor(
         }
         renderThread = null
     }
-    
-    private inner class RenderThread(private val surfaceHolder: SurfaceHolder) : Thread("TerminalRenderThread") {
+
+    private inner class RenderThread(private val renderSurface: Surface) : Thread("TerminalRenderThread") {
         @Volatile
         private var running = false
         
@@ -769,7 +783,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                     // === 3. 渲染 ===
                     var canvas: Canvas? = null
                     try {
-                        canvas = surfaceHolder.lockCanvas()
+                        canvas = renderSurface.lockCanvas()
                         if (canvas != null) {
                             drawTerminal(canvas)
                             isDirty = false
@@ -783,7 +797,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                     } finally {
                         canvas?.let {
                             try {
-                                surfaceHolder.unlockCanvasAndPost(it)
+                                renderSurface.unlockCanvasAndPost(it)
                             } catch (e: Exception) {
                                 Log.e("CanvasTerminalView", "Failed to unlock canvas", e)
                             }
