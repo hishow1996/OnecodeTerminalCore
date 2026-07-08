@@ -255,8 +255,8 @@ class CanvasTerminalView @JvmOverloads constructor(
                 requestRender()
             },
             onScaleEnd = {
-                // 手势结束才一次性同步终端尺寸（resize + SIGWINCH）
-                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
+                // 手势结束才一次性同步终端尺寸（resize + SIGWINCH），即时生效
+                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
                 requestRender()
             },
             onScroll = { _, distanceY ->
@@ -466,8 +466,8 @@ class CanvasTerminalView @JvmOverloads constructor(
             },
             onScaleEnd = {
                 // 手势结束才一次性把积累的字号同步给终端：resize emulator + setWindowSize(=SIGWINCH)，
-                // 让 opencode 收到稳定单一的新列数后自行清屏重绘。
-                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
+                // 让 opencode 收到稳定单一的新列数后自行清屏重绘。即时生效，不等去抖。
+                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
                 requestRender()
             },
             onScroll = { _, distanceY ->
@@ -548,7 +548,7 @@ class CanvasTerminalView @JvmOverloads constructor(
             oldFontSize != newConfig.fontSize
         ) {
             loadAndApplyFont()
-            updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
+            updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
             requestRender()
         } else {
             // 其他配置改变，也需要重新渲染
@@ -563,7 +563,7 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 字体大小的更新现在由 textMetrics.updateFromRenderConfig 处理
         // 这里可以保留用于缩放手势等场景
         textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
-        updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height())
+        updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
         requestRender()
     }
 
@@ -963,9 +963,14 @@ class CanvasTerminalView @JvmOverloads constructor(
         
         for (col in line.indices) {
             val termChar = line[col]
+            // 宽字符占位格(隐藏空格)：宽字符本身已按2格宽度绘制并推进，此格不画也不推进，
+            // 否则会让每个宽字符多占1格、相邻宽字符之间出现"一个空格"的缝隙。
+            if (termChar.isHidden && termChar.char == ' ') {
+                continue
+            }
             val cellWidth = textMetrics.getCellWidth(termChar.char)
             val actualCharWidth = charWidth * cellWidth
-            
+
             if (termChar.bgColor != config.backgroundColor) {
                 if (currentBgColor != termChar.bgColor) {
                     // Flush previous BG
@@ -1011,6 +1016,15 @@ class CanvasTerminalView @JvmOverloads constructor(
         for (col in line.indices) {
             val termChar = line[col]
             val char = termChar.char
+            // 宽字符占位格(隐藏空格)：宽字符本身已按2格宽度绘制并推进，此格不画也不推进，
+            // 否则相邻宽字符之间会多出"一个空格"的缝隙。
+            if (termChar.isHidden && char == ' ') {
+                if (sb.isNotEmpty()) {
+                    drawTextRun(canvas, sb.toString(), runStartX, y + baseline, currentFgColor, currentFontType, currentBold, currentItalic, currentUnderline, currentStrike, charWidth)
+                    sb.setLength(0)
+                }
+                continue
+            }
             val cellWidth = textMetrics.getCellWidth(char)
             val actualCharWidth = charWidth * cellWidth
             
@@ -1098,6 +1112,8 @@ class CanvasTerminalView @JvmOverloads constructor(
     private fun getXOffsetForCol(line: Array<TerminalChar>, col: Int, charWidth: Float): Float {
         var offset = 0f
         for (i in 0 until col) {
+            // 宽字符占位格(隐藏空格)不贡献水平偏移，其位置已由前一个宽字符的2格宽度覆盖
+            if (line[i].isHidden && line[i].char == ' ') continue
             offset += charWidth * textMetrics.getCellWidth(line[i].char)
         }
         return offset
@@ -1825,7 +1841,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     /**
      * 更新终端窗口大小
      */
-    private fun updateTerminalSize(width: Int, height: Int) {
+    private fun updateTerminalSize(width: Int, height: Int, immediate: Boolean = false) {
         if (width <= 0 || height <= 0) return
 
         // 1. 记录当前的滚动状态（基于行数，而不是像素）
@@ -1864,7 +1880,13 @@ class CanvasTerminalView @JvmOverloads constructor(
         pendingHeight = height
         pendingScrollRows = currentScrollRows
         mainHandler.removeCallbacks(resizeCommitRunnable)
-        mainHandler.postDelayed(resizeCommitRunnable, resizeDebounceMs)
+        // 缩放结束/字体变更等离散事件立即同步 resize+SIGWINCH，让 opencode 及时按新
+        // 列数重排；仅在键盘起落的连续帧场景走去抖，避免逐帧重排产生重影。
+        if (immediate) {
+            commitPendingResize()
+        } else {
+            mainHandler.postDelayed(resizeCommitRunnable, resizeDebounceMs)
+        }
     }
 
     private fun commitPendingResize() {
