@@ -175,16 +175,18 @@ fun TerminalHome(
         )
 
         if (env.isFullscreen) {
-            Column(
+            // 终端区域固定填满整屏，SurfaceView 不再随键盘起落逐帧 reposition，
+            // 杜绝键盘呼出/隐藏时"内容出现两次、上下移动看到内容两次"的撕裂重影。
+            // 底部快捷栏改为 overlay 悬浮在键盘正上方(align Bottom + imePadding)。
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding()
             ) {
-                // 终端输出区域 - 固定占剩余空间，不随键盘上移
+                // 终端输出区域 - 固定填满整屏，高度不随键盘变化
                 CanvasTerminalScreen(
                     emulator = env.terminalEmulator,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxSize(),
                     config = fontConfig,
                     pty = currentPty,
                     onInput = { env.onSendInput(it, false) },
@@ -194,44 +196,54 @@ fun TerminalHome(
                     onViewReady = { terminalViewRef = it }
                 )
 
-                // 底部快捷栏 - 直输模式用定制快捷栏(含橙色⌨/⏎/⇄), 否则回退到 VirtualKeyboard
-                if (isDirectInputMode) {
-                    DirectInputCompactBar(
-                        onKeyPress = { key -> env.onSendInput(key, false) },
-                        onInterrupt = env::onInterrupt,
-                        onExitDirectMode = {
-                            isDirectInputMode = false
-                            showVirtualKeyboard = false
-                            imeShown = false
-                        },
-                        onToggleIme = {
-                            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                            if (imeShown) {
+                // 底部快捷栏 - 悬浮在键盘正上方：跟随 IME 平滑上浮/回落
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .imePadding()
+                        .navigationBarsPadding()
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                ) {
+                    // 直输模式用定制快捷栏(含橙色⌨/⏎/⇄), 否则回退到 VirtualKeyboard
+                    if (isDirectInputMode) {
+                        DirectInputCompactBar(
+                            onKeyPress = { key -> env.onSendInput(key, false) },
+                            onInterrupt = env::onInterrupt,
+                            onExitDirectMode = {
+                                isDirectInputMode = false
+                                showVirtualKeyboard = false
                                 imeShown = false
-                                keyboardController?.hide()
-                                imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
-                            } else {
-                                val tv = terminalViewRef
-                                if (tv != null) {
-                                    tv.requestFocus()
-                                    tv.post {
-                                        imm?.showSoftInput(tv, InputMethodManager.SHOW_FORCED)
+                            },
+                            onToggleIme = {
+                                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                                if (imeShown) {
+                                    imeShown = false
+                                    keyboardController?.hide()
+                                    imm?.hideSoftInputFromWindow(rootView.windowToken, 0)
+                                } else {
+                                    val tv = terminalViewRef
+                                    if (tv != null) {
+                                        tv.requestFocus()
+                                        tv.post {
+                                            imm?.showSoftInput(tv, InputMethodManager.SHOW_FORCED)
+                                        }
+                                        imeShown = true
                                     }
-                                    imeShown = true
                                 }
-                            }
-                        },
-                        // 已在 fullscreen 分支内, ⇄ 永远发 Tab (opencode plan/build 切换)
-                        switchAction = { env.onSendInput("\t", false) },
-                        fontSize = fontSize * 0.85f,
-                        padding = padding * 0.7f
-                    )
-                } else {
-                    VirtualKeyboard(
-                        onKeyPress = { key -> env.onSendInput(key, false) },
-                        fontSize = fontSize * 0.85f,
-                        padding = padding * 0.7f
-                    )
+                            },
+                            // 已在 fullscreen 分支内, ⇄ 永远发 Tab (opencode plan/build 切换)
+                            switchAction = { env.onSendInput("\t", false) },
+                            fontSize = fontSize * 0.85f,
+                            padding = padding * 0.7f
+                        )
+                    } else {
+                        VirtualKeyboard(
+                            onKeyPress = { key -> env.onSendInput(key, false) },
+                            fontSize = fontSize * 0.85f,
+                            padding = padding * 0.7f
+                        )
+                    }
                 }
             }
         } else {
