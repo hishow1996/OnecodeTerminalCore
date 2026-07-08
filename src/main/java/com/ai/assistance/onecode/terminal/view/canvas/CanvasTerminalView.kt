@@ -1065,8 +1065,10 @@ class CanvasTerminalView @JvmOverloads constructor(
                     sb.setLength(0)
                 }
                 
-                // Draw wide char
-                drawTextRun(canvas, char.toString(), x + (charWidth / 2), y + baseline, fgColor, fontType, isBold, isItalic, isUnderline, isStrike, actualCharWidth)
+                // Draw wide char: 左对齐到单元格起点，由 drawTextRun 内的 textScaleX
+                // 把字形横向拉伸到 actualCharWidth（2 格），填满单元格，杜绝相邻宽字符之间
+                // 出现"一个空格宽度"的空隙。
+                drawTextRun(canvas, char.toString(), x, y + baseline, fgColor, fontType, isBold, isItalic, isUnderline, isStrike, actualCharWidth)
                 
                 // Reset run
                 runStartX = x + actualCharWidth
@@ -1111,7 +1113,17 @@ class CanvasTerminalView @JvmOverloads constructor(
 
         // 逐字符按固定 cell 宽对齐绘制，杜绝自然 advance 漂移导致越界
         if (text.length <= 1) {
+            // 单字符（含宽字符）：测量字形自然 advance，按目标 cell 宽横向缩放，
+            // 让字形精确填满所属单元格。这样无论字体的 CJK advance 是否恰为
+            // 2× 拉丁宽，宽字符都能贴满 2 格，相邻宽字符之间不再出现空隙，
+            // 也使得表格分隔符（| 落在整数列）能与 CJK 文本视觉对齐。
+            val natural = textPaint.measureText(text)
+            val target = charWidth.coerceAtLeast(0f)
+            if (natural > 0f && kotlin.math.abs(natural - target) > 0.5f) {
+                textPaint.textScaleX = target / natural
+            }
             canvas.drawText(text, x, y, textPaint)
+            textPaint.textScaleX = 1f
         } else {
             var cx = x
             for (ch in text) {
