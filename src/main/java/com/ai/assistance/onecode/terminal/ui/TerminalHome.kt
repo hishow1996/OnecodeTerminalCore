@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import kotlin.math.max
 import kotlin.math.min
@@ -516,7 +517,9 @@ private fun SessionTabBar(
     onCloseSession: (String) -> Unit
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding(),
         color = Color(0xFF2D2D2D)
     ) {
         Row(
