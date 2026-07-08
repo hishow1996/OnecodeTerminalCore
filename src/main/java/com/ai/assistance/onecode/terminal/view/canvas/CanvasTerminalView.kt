@@ -1372,20 +1372,12 @@ class CanvasTerminalView @JvmOverloads constructor(
                 actionMode?.finish()
                 selectionManager.clearSelection()
                 requestRender()
-                if (isFullscreenMode) {
-                    postDelayed({
-                        showSoftKeyboard()
-                    }, 100)
-                } else {
+                if (!isFullscreenMode) {
                     onRequestShowKeyboard?.invoke()
                 }
                 return handled || super.onTouchEvent(event)
             }
-            if (isFullscreenMode) {
-                postDelayed({
-                    showSoftKeyboard()
-                }, 100)
-            } else {
+            if (!isFullscreenMode) {
                 onRequestShowKeyboard?.invoke()
             }
         }
