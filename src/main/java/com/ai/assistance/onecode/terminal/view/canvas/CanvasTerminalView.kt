@@ -783,7 +783,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                     // === 3. 渲染 ===
                     var canvas: Canvas? = null
                     try {
-                        canvas = renderSurface.lockCanvas()
+                        canvas = renderSurface.lockCanvas(null)
                         if (canvas != null) {
                             drawTerminal(canvas)
                             isDirty = false
