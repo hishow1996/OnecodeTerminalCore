@@ -126,7 +126,8 @@ class CanvasTerminalView @JvmOverloads constructor(
             reloadFontMetrics()
         }
     
-    // 滚动偏移
+    // 滚动偏移（主线程手势回调写、渲染线程读，加 volatile 保证可见）
+    @Volatile
     private var scrollOffsetY = 0f
     
     // 惯性滚动处理器
@@ -840,14 +841,14 @@ class CanvasTerminalView @JvmOverloads constructor(
             }
         }
         
-        // 使用完整内容（历史 + 屏幕缓冲）
-        val fullContent = em.getFullContent()
+        // 使用完整内容（历史 + 屏幕缓冲）的稳定快照，避免与 IO 线程 parse 写入并发竞争
+        val fullContent = em.getFullContentSnapshot()
         val historySize = em.getHistorySize()
-        
+
         val charWidth = textMetrics.charWidth
         val charHeight = textMetrics.charHeight
         val baseline = textMetrics.charBaseline
-        
+
         // 1. 首先全屏清屏（防止前帧内容残留和闪烁）
         bgPaint.color = config.backgroundColor
         canvas.drawRect(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat(), bgPaint)
@@ -860,20 +861,21 @@ class CanvasTerminalView @JvmOverloads constructor(
         val availHeightCanvas = (canvas.height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
         val availWidthCanvas = (canvas.width - config.paddingLeft - config.paddingRight).coerceAtLeast(charWidth)
 
-        // 限制最大滚动偏移（不能超过内容高度），以 availHeight 为准
+        // 整帧用本地 offset 副本，杜绝渲染中途主线程手势回调改 scrollOffsetY 导致
+        // 前半批行用旧偏移、后半批用新偏移画出"内容显示成两个"的重影。
         val maxScrollOffset = max(0f, fullContent.size * charHeight - availHeightCanvas)
 
-        // 如果需要滚动到底部，在渲染时执行（使用正确的可用高度）
         if (needScrollToBottom) {
             scrollOffsetY = maxScrollOffset
             needScrollToBottom = false
         }
 
         scrollOffsetY = scrollOffsetY.coerceIn(0f, maxScrollOffset)
+        val offset = scrollOffsetY
 
         // 计算可见区域
         val visibleRows = (availHeightCanvas / charHeight).toInt() + 1
-        val startRow = (scrollOffsetY / charHeight).toInt()
+        val startRow = (offset / charHeight).toInt()
         val endRow = min(startRow + visibleRows, fullContent.size)
 
 
@@ -886,7 +888,7 @@ class CanvasTerminalView @JvmOverloads constructor(
             drawnCharCount += line.size
 
             // 使用绝对坐标计算，避免 startRow 跳变导致的整体偏移；纵向加 paddingTop 留白
-            val exactY = row * charHeight - scrollOffsetY + padTop
+            val exactY = row * charHeight - offset + padTop
             val y = kotlin.math.round(exactY)
 
             // 绘制该行的所有字符；横向起点为 paddingLeft，使 cols 与可视宽度对齐
@@ -905,7 +907,7 @@ class CanvasTerminalView @JvmOverloads constructor(
             
             // 只有当光标在可见区域内时才绘制
             if (cursorRow >= startRow && cursorRow < endRow) {
-                val exactCursorY = cursorRow * charHeight - scrollOffsetY + padTop
+                val exactCursorY = cursorRow * charHeight - offset + padTop
                 val cursorY = kotlin.math.round(exactCursorY)
                 
                 // 计算光标的 x 坐标，考虑宽字符；起点加 paddingLeft 与正文对齐

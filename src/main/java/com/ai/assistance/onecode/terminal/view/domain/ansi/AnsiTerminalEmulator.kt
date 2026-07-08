@@ -68,6 +68,11 @@ class AnsiTerminalEmulator(
     // 历史缓冲区（用于滚动回溯）
     private val historyBuffer: MutableList<Array<TerminalChar>> = mutableListOf()
     private val historyWrapped: MutableList<Boolean> = mutableListOf()
+
+    // 渲染线程读 / IO线程 parse 写 / 主线程 resize 之间的同步锁。
+    // 滑动消息页时渲染线程密集遍历 fullContent，与 IO 线程并发改 buffer 竞争会导致
+    // 同行取到半改内容、行序错位、排版乱、内容闪重影，故结构性变更与渲染快照都加锁。
+    private val bufferLock = Any()
     
     // 备用屏幕缓冲区（用于全屏应用如 vim）
     private var altScreenBuffer: Array<Array<TerminalChar>>? = null
@@ -112,7 +117,7 @@ class AnsiTerminalEmulator(
     /**
      * 解析并执行 ANSI 序列
      */
-    fun parse(text: String) {
+    fun parse(text: String) = synchronized(bufferLock) {
         val combined = if (pendingSequence.isEmpty()) text else pendingSequence + text
         pendingSequence = ""
         val scanner = AnsiScanner(combined)
@@ -749,6 +754,19 @@ class AnsiTerminalEmulator(
     fun getFullContent(): List<Array<TerminalChar>> {
         return fullContentView
     }
+
+    /**
+     * 返回历史+屏幕缓冲的稳定快照（行深拷贝），供渲染线程整帧使用。
+     * 在 bufferLock 内拷贝，期间 IO 线程的 parse 写入会被阻塞，保证本帧
+     * 不会被半改内容污染、行序不会被增删打乱 → 消除"消息显示成两个/排版乱/闪重影"。
+     */
+    fun getFullContentSnapshot(): List<Array<TerminalChar>> = synchronized(bufferLock) {
+        val total = historyBuffer.size + screenBuffer.size
+        val result = ArrayList<Array<TerminalChar>>(total)
+        for (line in historyBuffer) result.add(line.copyOf())
+        for (line in screenBuffer) result.add(line.copyOf())
+        result
+    }
     
     /**
      * 内部类：提供历史+屏幕缓冲的统一视图，避免每次创建新列表
@@ -769,9 +787,9 @@ class AnsiTerminalEmulator(
     /**
      * 获取历史缓冲区大小
      */
-    fun getHistorySize(): Int = historyBuffer.size
+    fun getHistorySize(): Int = synchronized(bufferLock) { historyBuffer.size }
     
-    fun resize(newWidth: Int, newHeight: Int) {
+    fun resize(newWidth: Int, newHeight: Int) = synchronized(bufferLock) {
         if (newWidth == screenWidth && newHeight == screenHeight) return
 
         // 备用屏（如 opencode 这类全屏 TUI）不参与主屏的 reflow：TUI 自己用光标定位绘制，
