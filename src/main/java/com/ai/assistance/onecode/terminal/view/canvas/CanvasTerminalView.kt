@@ -161,7 +161,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     // 交替浮现 → "上下移动看到内容两次"。这里把真正的 resize+SIGWINCH 延后到尺寸稳定
     // 一小段窗口后再执行一次，消除中间逐帧重排。
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val resizeDebounceMs = 80L
+    private val resizeDebounceMs = 350L
     private var pendingCols = -1
     private var pendingRows = -1
     private var pendingWidth = 0
@@ -219,6 +219,11 @@ class CanvasTerminalView @JvmOverloads constructor(
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
         
         // TextureView 渲染在 View 层级中，无需 Z-order 设置
+
+        // 不透明优化：避免 IME 动画期间 TextureView 位移合成时出现残帧透明过渡重影。
+        // Termux 用普通 View 并 isOpaque()=true 达到同样效果；TextureView 需显式设置。
+        setOpaque(true)
+        setBackgroundColor(0xFF000000.toInt())
     }
 
     private fun isAccessibilityEnabled(): Boolean {
