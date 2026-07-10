@@ -73,7 +73,9 @@ import com.ai.assistance.onecode.terminal.utils.TerminalFontConfigManager
 import android.graphics.Typeface
 import android.view.inputmethod.InputMethodManager
 import java.io.File
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 
+@OptIn(ExperimentalLayoutApi::class)
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun TerminalHome(
