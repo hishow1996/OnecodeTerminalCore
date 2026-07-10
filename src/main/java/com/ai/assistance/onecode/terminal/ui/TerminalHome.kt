@@ -57,9 +57,7 @@ import android.view.MotionEvent
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.isImeVisible
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.abs
@@ -119,6 +117,11 @@ fun TerminalHome(
     var imeShown by remember { mutableStateOf(false) }
     var terminalViewRef by remember { mutableStateOf<CanvasTerminalView?>(null) }
 
+    // 真实 IME 显示状态：跟随 WindowInsets，避免手动 Boolean 与实际不同步
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(imeVisible) {
+        imeShown = imeVisible
+    }
 
 
     // 语法高亮
@@ -179,7 +182,6 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding()
             ) {
                 CanvasTerminalScreen(
                     emulator = env.terminalEmulator,
@@ -236,7 +238,6 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding()
             ) {
                 AndroidView(
                     factory = { context ->

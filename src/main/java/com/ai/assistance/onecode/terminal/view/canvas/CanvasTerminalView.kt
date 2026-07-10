@@ -587,8 +587,6 @@ class CanvasTerminalView @JvmOverloads constructor(
     // === SurfaceHolder.Callback 实现 ===
     
     // 防止死循环的上次重建时间
-    private var lastRecreateTime = 0L
-
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         Log.d("CanvasTerminalView", "onSizeChanged: ${w}x${h} (old: ${oldw}x${oldh})")
