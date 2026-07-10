@@ -57,6 +57,7 @@ import android.view.MotionEvent
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import kotlin.math.max
 import kotlin.math.min
@@ -184,6 +185,7 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .imePadding()
             ) {
                 CanvasTerminalScreen(
                     emulator = env.terminalEmulator,
@@ -240,6 +242,7 @@ fun TerminalHome(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .imePadding()
             ) {
                 AndroidView(
                     factory = { context ->
