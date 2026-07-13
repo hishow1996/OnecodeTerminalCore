@@ -340,7 +340,7 @@ fun TerminalHome(
                     // 终端工具栏
                     TerminalToolbar(
                         onInterrupt = env::onInterrupt,
-                        onEnter = { env.onSendInput("\r", false) },
+                        onEnter = { env.onSendInput(env.command, true) },
                         onSendCommand = { env.onSendInput(it, true) },
                         fontSize = fontSize * 0.8f,
                         padding = padding,
