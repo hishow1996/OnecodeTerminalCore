@@ -70,6 +70,7 @@ import com.ai.assistance.onecode.terminal.view.SyntaxColors
 import com.ai.assistance.onecode.terminal.view.SyntaxHighlightingVisualTransformation
 import com.ai.assistance.onecode.terminal.view.highlight
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tab
 import com.ai.assistance.onecode.terminal.view.canvas.CanvasTerminalScreen
 import com.ai.assistance.onecode.terminal.view.canvas.RenderConfig
 import com.ai.assistance.onecode.terminal.utils.TerminalFontConfigManager
@@ -135,6 +136,8 @@ fun TerminalHome(
     // 非全屏模式下虚拟键盘显示状态
     var showVirtualKeyboard by remember { mutableStateOf(false) }
     var isDirectInputMode by remember { mutableStateOf(false) }
+    // 会话标签页默认隐藏，由功能区按钮呼出/隐藏
+    var showSessionTabs by remember { mutableStateOf(false) }
 
     // 进入 opencode (alt screen/fullscreen) 时自动切到直输模式，显示定制快捷栏
     LaunchedEffect(env.isFullscreen) {
@@ -163,17 +166,19 @@ fun TerminalHome(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 会话标签页
-        SessionTabBar(
-            sessions = env.sessions,
-            currentSessionId = env.currentSessionId,
-            onSessionClick = env::onSwitchSession,
-            onNewSession = env::onNewSession,
-            onCloseSession = { sessionId ->
-                sessionToDelete = sessionId
-                showDeleteConfirmDialog = true
-            }
-        )
+        // 会话标签页（由功能区按钮呼出/隐藏，默认隐藏）
+        if (showSessionTabs) {
+            SessionTabBar(
+                sessions = env.sessions,
+                currentSessionId = env.currentSessionId,
+                onSessionClick = env::onSwitchSession,
+                onNewSession = env::onNewSession,
+                onCloseSession = { sessionId ->
+                    sessionToDelete = sessionId
+                    showDeleteConfirmDialog = true
+                }
+            )
+        }
 
         if (env.isFullscreen) {
             Column(
@@ -221,6 +226,7 @@ fun TerminalHome(
                             }
                         },
                         switchAction = { env.onSendInput("\t", false) },
+                        onToggleTabs = { showSessionTabs = !showSessionTabs },
                         fontSize = fontSize * 0.85f,
                         padding = padding * 0.7f
                     )
@@ -326,6 +332,7 @@ fun TerminalHome(
                                 imeShown = false
                             }
                         },
+                        onToggleTabs = { showSessionTabs = !showSessionTabs },
                         fontSize = fontSize * 0.85f,
                         padding = padding * 0.7f
                     )
@@ -338,7 +345,8 @@ fun TerminalHome(
                         fontSize = fontSize * 0.8f,
                         padding = padding,
                         onNavigateToSetup = onNavigateToSetup,
-                        onNavigateToSettings = onNavigateToSettings
+                        onNavigateToSettings = onNavigateToSettings,
+                        onToggleTabs = { showSessionTabs = !showSessionTabs }
                     )
 
                     // 当前输入行
@@ -617,7 +625,8 @@ private fun TerminalToolbar(
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     onNavigateToSetup: () -> Unit,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    onToggleTabs: () -> Unit
 ) {
     val context = LocalContext.current
     Surface(
@@ -672,6 +681,22 @@ private fun TerminalToolbar(
                     fontSize = fontSize,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
+                )
+            }
+
+            // 标签页呼出/隐藏按钮（Enter 旁，点击切换会话标签栏）
+            Surface(
+                modifier = Modifier.clickable { onToggleTabs() },
+                color = Color(0xFF4A4A4A),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Tab,
+                    contentDescription = "标签页",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .padding(horizontal = padding * 0.75f, vertical = padding * 0.45f)
+                        .size(fontSize.value.dp * 1.1f)
                 )
             }
 
@@ -892,6 +917,7 @@ private fun DirectInputCompactBar(
     onExitDirectMode: () -> Unit,
     onToggleIme: () -> Unit,
     switchAction: () -> Unit,
+    onToggleTabs: () -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     modifier: Modifier = Modifier
@@ -927,14 +953,35 @@ private fun DirectInputCompactBar(
                 .padding(horizontal = padding * 0.5f, vertical = padding * 0.3f),
             verticalArrangement = Arrangement.spacedBy(padding * 0.3f)
         ) {
-            // 第1行：ESC  /  Tab  HOME  ↑  END  PGUP  ⌨(橙)
+            // 第1行：ESC  /  ⓘ标签页  HOME  ↑  END  PGUP  ⌨(橙)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
                 KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("/", "/", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                // Tab 改为标签页呼出/隐藏快捷键（图标）
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 44.dp)
+                        .clickable { onToggleTabs() },
+                    color = Color(0xFF3A3A3A),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Tab,
+                            contentDescription = "标签页",
+                            tint = Color.White,
+                            modifier = Modifier.size(fontSize.value.dp * 1.1f)
+                        )
+                    }
+                }
                 KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
