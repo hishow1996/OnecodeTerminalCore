@@ -622,45 +622,44 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // 5 行 x 4 列逐字像素艺术字模，重组为 "onecode"；
-        // one(浅灰 250) + code(橙 208)。使用 U+2588 (█) 画左右竖线与右长竖；
-        // 使用 U+2580 (▀)、U+2584 (▄) 半角方块画横线（高度仅 0.5 cell），
-        // 物理上实现横竖线条粗细 1:1 完全一致，消除"横粗竖细"与"字被拉长"两个痛点。
+        // 5 行 x 4 列等宽全方块 █ 像素字模，重组为 "onecode"；
+        // one(浅灰 250) + code(橙 208)。全部使用 U+2588 (█) 填充横竖笔画；
+        // 物理上实现横竖线条粗细 1:1 完全一致，彻底消除由于行距导致的横线变细与分裂痛点。
         // 总宽 34 列（4×7 + 6），左右两侧自动留出 3-5 列呼吸空白。
         val glyphs = mapOf(
             'o' to listOf(
-                " ▀▀ ",
+                "████",
                 "█  █",
                 "█  █",
-                " ▄▄ ",
+                "████",
                 "    "
             ),
             'n' to listOf(
-                " ▀▀ ",
+                "████",
                 "█  █",
                 "█  █",
                 "█  █",
                 "    "
             ),
             'e' to listOf(
-                " ▀▀ ",
-                "█▀▀█",
-                "█   ",
-                " ▄▄ ",
+                "████",
+                "█  █",
+                "███ ",
+                "████",
                 "    "
             ),
             'c' to listOf(
-                " ▀▀ ",
+                "████",
                 "█   ",
                 "█   ",
-                " ▄▄ ",
+                "████",
                 "    "
             ),
             'd' to listOf(
                 "   █",
-                " ▀▀█",
+                "████",
                 "█  █",
-                " ▄▄█",
+                "████",
                 "    "
             )
         )
