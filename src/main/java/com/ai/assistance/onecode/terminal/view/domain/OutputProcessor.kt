@@ -622,67 +622,51 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // 7 行 x 3 列等宽微像素 █ 字模，重组为 "onecode"；
-        // one(浅灰 250) + code(橙 208)。全部使用 U+2588 (█) 填充横竖笔画；
-        // 依照 1783163655425.jpg 图片像素微调：o/n/e/c 5行高3列宽；d 的长竖柄顶天，总高为 7 行；
-        // 物理上实现横竖线条粗细 1:1 完全一致。总宽 27 列（3×7 + 6），完美适合各种分辨率。
+        // 4 行等宽微像素字模（通过半高方块 ▀ ▄ 垂直压缩合并，高宽比接近完美的 1:1，消除上下缝隙并解决拉伸痛点）
+        // 依照 1783163655425.jpg 图片像素微调：o/n/e/c 像素体 5行高3列宽；d 的长竖柄顶天。
+        // 总宽仅 27 列（3×7 + 6 间隔），完美居中且适合各种窄屏分辨率。
         val glyphs = mapOf(
             'o' to listOf(
                 "   ",
-                "   ",
-                "███",
+                "█▀█",
                 "█ █",
-                "█ █",
-                "█ █",
-                "███"
+                "▀▀▀"
             ),
             'n' to listOf(
                 "   ",
-                "   ",
-                "███",
+                "█▀█",
                 "█ █",
-                "█ █",
-                "█ █",
-                "█ █"
+                "▀ ▀"
             ),
             'e' to listOf(
                 "   ",
-                "   ",
-                "███",
-                "█ █",
-                "███",
-                "█  ",
-                "███"
+                "█▀█",
+                "█▀▀",
+                "▀▀▀"
             ),
             'c' to listOf(
                 "   ",
-                "   ",
-                "███",
+                "█▀█",
                 "█  ",
-                "█  ",
-                "█  ",
-                "███"
+                "▀▀▀"
             ),
             'd' to listOf(
                 "  █",
-                "  █",
-                "███",
+                "█▀█",
                 "█ █",
-                "█ █",
-                "█ █",
-                "███"
+                "▀▀▀"
             )
         )
         val text = "onecode"
         val sep = " "
-        val height = 7
+        val height = 4
         val ansiRegex = Regex("\u001B\\[[0-9;]*m")
         // 逐行拼装：每个字符 glyph 套上对应颜色（one 0..2 灰、code 3..6 橙），以单 cell 间隔分隔
         val artLines = List(height) { row ->
             val sb = StringBuilder()
             text.forEachIndexed { i, ch ->
                 if (i > 0) sb.append(sep)
-                val glyph = glyphs[ch]?.get(row) ?: "     "
+                val glyph = glyphs[ch]?.get(row) ?: "   "
                 val color = if (i < 3) "\u001B[38;5;250m" else "\u001B[38;5;208m"
                 sb.append(color).append(glyph).append("\u001B[0m")
             }
@@ -694,12 +678,17 @@ class OutputProcessor(
         val prefix = if (screenWidth > artWidth) (screenWidth - artWidth) / 2 else 0
         val pad = " ".repeat(prefix)
         
+        // 副标题字串，控制在 38 字符，在任何手机屏幕中均能 100% 居中且永不换行
+        val subText = ">> Portable Ubuntu 24.04 on Android <<"
+        val subPrefix = if (screenWidth > subText.length) (screenWidth - subText.length) / 2 else 0
+        val subPad = " ".repeat(subPrefix)
+        
         val sb = StringBuilder("\u001B[2J\u001B[H")
         for (line in artLines) {
             sb.append(pad).append(line).append("\r\n")
         }
         sb.append("\r\n")
-        sb.append("  >> Your portable Ubuntu environment on Android <<\r\n")
+        sb.append(subPad).append(subText).append("\r\n")
         
         // 直接发送到 ANSI 解析器（Canvas 渲染）
         // 清屏操作会清除之前初始化过程中的所有输出
