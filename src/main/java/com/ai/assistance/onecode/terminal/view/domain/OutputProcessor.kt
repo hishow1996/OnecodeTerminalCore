@@ -622,50 +622,60 @@ class OutputProcessor(
     private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
         val session = sessionManager.getSession(sessionId) ?: return
         
-        // 5 行 x 4 列等宽全方块 █ 像素字模，重组为 "onecode"；
+        // 7 行 x 3 列等宽微像素 █ 字模，重组为 "onecode"；
         // one(浅灰 250) + code(橙 208)。全部使用 U+2588 (█) 填充横竖笔画；
-        // 物理上实现横竖线条粗细 1:1 完全一致，彻底消除由于行距导致的横线变细与分裂痛点。
-        // 总宽 34 列（4×7 + 6），左右两侧自动留出 3-5 列呼吸空白。
+        // 依照 1783163655425.jpg 图片像素微调：o/n/e/c 5行高3列宽；d 的长竖柄顶天，总高为 7 行；
+        // 物理上实现横竖线条粗细 1:1 完全一致。总宽 27 列（3×7 + 6），完美适合各种分辨率。
         val glyphs = mapOf(
             'o' to listOf(
-                "████",
-                "█  █",
-                "█  █",
-                "████",
-                "    "
+                "   ",
+                "   ",
+                "███",
+                "█ █",
+                "█ █",
+                "█ █",
+                "███"
             ),
             'n' to listOf(
-                "████",
-                "█  █",
-                "█  █",
-                "█  █",
-                "    "
+                "   ",
+                "   ",
+                "███",
+                "█ █",
+                "█ █",
+                "█ █",
+                "█ █"
             ),
             'e' to listOf(
-                "████",
-                "█  █",
-                "███ ",
-                "████",
-                "    "
+                "   ",
+                "   ",
+                "███",
+                "█ █",
+                "███",
+                "█  ",
+                "███"
             ),
             'c' to listOf(
-                "████",
-                "█   ",
-                "█   ",
-                "████",
-                "    "
+                "   ",
+                "   ",
+                "███",
+                "█  ",
+                "█  ",
+                "█  ",
+                "███"
             ),
             'd' to listOf(
-                "   █",
-                "████",
-                "█  █",
-                "████",
-                "    "
+                "  █",
+                "  █",
+                "███",
+                "█ █",
+                "█ █",
+                "█ █",
+                "███"
             )
         )
         val text = "onecode"
         val sep = " "
-        val height = 5
+        val height = 7
         val ansiRegex = Regex("\u001B\\[[0-9;]*m")
         // 逐行拼装：每个字符 glyph 套上对应颜色（one 0..2 灰、code 3..6 橙），以单 cell 间隔分隔
         val artLines = List(height) { row ->
