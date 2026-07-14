@@ -178,6 +178,9 @@ fun TerminalHome(
                     showDeleteConfirmDialog = true
                 }
             )
+        } else {
+            // 标签栏隐藏时仍保留刘海高度占位，避免 onecode 标题被刘海遮挡
+            Spacer(Modifier.statusBarsPadding().fillMaxWidth())
         }
 
         if (env.isFullscreen) {
