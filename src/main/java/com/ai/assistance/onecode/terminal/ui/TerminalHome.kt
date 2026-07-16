@@ -185,27 +185,16 @@ fun TerminalHome(
     val toggleTabBar: () -> Unit = { showTabBar = !showTabBar }
     val onEnterSend: () -> Unit = { env.onSendInput(env.command, true) }
 
-    Column(
+    // 方案C：外层用 Box 而非 Column。终端区域始终 fillMaxSize 整屏，
+    // 其 SurfaceView 的 punch-hole 不会因标签栏显隐触发 onSizeChanged 错位。
+    // 标签栏作为 Box 第二层叠加浮在顶部（覆盖终端顶部约40dp，不再下推终端），
+    // 彻底回避 SurfaceView 重布局引发的「punch-hole 挖空标签栏内容→空白盒子」回归。
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
-        // 会话标签页（可由功能栏/直输快捷栏按钮呼出与收起）
-        // 用普通 if 块直接条件渲染，避免在 SurfaceView 兄弟节点旁使用
-        // AnimatedVisibility 时该子树出现 size>0 但像素绘制为空的「空白盒子」问题
-        if (showTabBar) {
-            SessionTabBar(
-                sessions = env.sessions,
-                currentSessionId = env.currentSessionId,
-                onSessionClick = env::onSwitchSession,
-                onNewSession = env::onNewSession,
-                onCloseSession = { sessionId ->
-                    sessionToDelete = sessionId
-                    showDeleteConfirmDialog = true
-                }
-            )
-        }
 
         if (env.isFullscreen) {
             Box(
@@ -479,6 +468,29 @@ fun TerminalHome(
                         )
                     }
                 }
+            }
+        }
+
+        // 会话标签页 - 作为 Box 叠加层（TopCenter），浮在终端顶部。
+        // 关键：标签栏显隐不再触发终端 SurfaceView 的 onSizeChanged，
+        // 因此 SurfaceView 的 punch-hole 不会被错位重组，标签栏内容可见。
+        // 视觉：呼出标签栏时覆盖终端顶部约 40dp，再按 ≡ 收起。
+        if (showTabBar) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+            ) {
+                SessionTabBar(
+                    sessions = env.sessions,
+                    currentSessionId = env.currentSessionId,
+                    onSessionClick = env::onSwitchSession,
+                    onNewSession = env::onNewSession,
+                    onCloseSession = { sessionId ->
+                        sessionToDelete = sessionId
+                        showDeleteConfirmDialog = true
+                    }
+                )
             }
         }
     }
