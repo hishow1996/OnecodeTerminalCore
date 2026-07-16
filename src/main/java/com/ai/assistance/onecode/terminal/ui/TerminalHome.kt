@@ -78,9 +78,6 @@ import android.graphics.Typeface
 import android.view.inputmethod.InputMethodManager
 import java.io.File
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 
 @OptIn(ExperimentalLayoutApi::class)
 @RequiresApi(Build.VERSION_CODES.O)
@@ -195,11 +192,9 @@ fun TerminalHome(
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
         // 会话标签页（可由功能栏/直输快捷栏按钮呼出与收起）
-        AnimatedVisibility(
-            visible = showTabBar,
-            enter = expandVertically(),
-            exit = shrinkVertically()
-        ) {
+        // 用普通 if 块直接条件渲染，避免在 SurfaceView 兄弟节点旁使用
+        // AnimatedVisibility 时该子树出现 size>0 但像素绘制为空的「空白盒子」问题
+        if (showTabBar) {
             SessionTabBar(
                 sessions = env.sessions,
                 currentSessionId = env.currentSessionId,
