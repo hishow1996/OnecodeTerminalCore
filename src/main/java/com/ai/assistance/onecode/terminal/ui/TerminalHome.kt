@@ -76,6 +76,9 @@ import android.graphics.Typeface
 import android.view.inputmethod.InputMethodManager
 import java.io.File
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 
 @OptIn(ExperimentalLayoutApi::class)
 @RequiresApi(Build.VERSION_CODES.O)
@@ -177,23 +180,34 @@ fun TerminalHome(
         .fillMaxWidth()
         .onSizeChanged { inputBarHeight = it.height }
         .imePadding()
-    
+
+    // 顶部标签页栏显隐：默认显示；由功能栏/直输快捷栏里的按钮呼出与收起。
+    var showTabBar by remember { mutableStateOf(true) }
+    val toggleTabBar: () -> Unit = { showTabBar = !showTabBar }
+    val onEnterSend: () -> Unit = { env.onSendInput(env.command, true) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 会话标签页
-        SessionTabBar(
-            sessions = env.sessions,
-            currentSessionId = env.currentSessionId,
-            onSessionClick = env::onSwitchSession,
-            onNewSession = env::onNewSession,
-            onCloseSession = { sessionId ->
-                sessionToDelete = sessionId
-                showDeleteConfirmDialog = true
-            }
-        )
+        // 会话标签页（可由功能栏/直输快捷栏按钮呼出与收起）
+        AnimatedVisibility(
+            visible = showTabBar,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            SessionTabBar(
+                sessions = env.sessions,
+                currentSessionId = env.currentSessionId,
+                onSessionClick = env::onSwitchSession,
+                onNewSession = env::onNewSession,
+                onCloseSession = { sessionId ->
+                    sessionToDelete = sessionId
+                    showDeleteConfirmDialog = true
+                }
+            )
+        }
 
         if (env.isFullscreen) {
             Box(
@@ -246,7 +260,8 @@ fun TerminalHome(
                         switchAction = { env.onSendInput("\t", false) },
                         fontSize = fontSize * 0.85f,
                         padding = padding * 0.7f,
-                        onModifierChanged = { ctrl, alt -> terminalViewRef?.setModifierState(ctrl, alt) }
+                        onModifierChanged = { ctrl, alt -> terminalViewRef?.setModifierState(ctrl, alt) },
+                        onToggleTabBar = toggleTabBar
                     )
                 } else {
                     VirtualKeyboard(
@@ -354,14 +369,16 @@ fun TerminalHome(
                         },
                         fontSize = fontSize * 0.85f,
                         padding = padding * 0.7f,
-                        onModifierChanged = { ctrl, alt -> terminalViewRef?.setModifierState(ctrl, alt) }
+                        onModifierChanged = { ctrl, alt -> terminalViewRef?.setModifierState(ctrl, alt) },
+                        onToggleTabBar = toggleTabBar
                     )
                 } else {
                     // 终端工具栏
                     TerminalToolbar(
                         onInterrupt = env::onInterrupt,
-                        onEnter = { env.onSendInput("\r", false) },
+                        onEnter = onEnterSend,
                         onSendCommand = { env.onSendInput(it, true) },
+                        onToggleTabBar = toggleTabBar,
                         fontSize = fontSize * 0.8f,
                         padding = padding,
                         onNavigateToSetup = onNavigateToSetup,
@@ -642,7 +659,8 @@ private fun TerminalToolbar(
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     onNavigateToSetup: () -> Unit,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    onToggleTabBar: () -> Unit = {}
 ) {
     val context = LocalContext.current
     Surface(
@@ -694,6 +712,22 @@ private fun TerminalToolbar(
                     text = "Enter",
                     color = Color.White,
                     fontFamily = FontFamily.Monospace,
+                    fontSize = fontSize,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
+                )
+            }
+
+            // 呼出/隐藏标签页栏按钮
+            Surface(
+                modifier = Modifier.clickable { onToggleTabBar() },
+                color = Color(0xFF4A4A4A),
+                shape = RoundedCornerShape(6.dp)
+            ) {
+                Text(
+                    text = "≡",
+                    color = Color.White,
+                    fontFamily = FontFamily.Default,
                     fontSize = fontSize,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
@@ -920,7 +954,8 @@ private fun DirectInputCompactBar(
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     modifier: Modifier = Modifier,
-    onModifierChanged: (Boolean, Boolean) -> Unit = { _, _ -> }
+    onModifierChanged: (Boolean, Boolean) -> Unit = { _, _ -> },
+    onToggleTabBar: () -> Unit = {}
 ) {
     var ctrlActive by remember { mutableStateOf(false) }
     var altActive by remember { mutableStateOf(false) }
@@ -955,14 +990,36 @@ private fun DirectInputCompactBar(
                 .padding(horizontal = padding * 0.5f, vertical = padding * 0.3f),
             verticalArrangement = Arrangement.spacedBy(padding * 0.3f)
         ) {
-            // 第1行：ESC  /  Tab  HOME  ↑  END  PGUP  ⌨(橙)
+            // 第1行：ESC  /  ≡(标签栏)  HOME  ↑  END  PGUP  ⌨(橙)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
                 KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("/", "/", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 44.dp)
+                        .clickable { onToggleTabBar() },
+                    color = Color(0xFF3A3A3A),
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "≡",
+                            color = Color.White,
+                            fontFamily = FontFamily.Default,
+                            fontSize = fontSize,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                }
                 KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
