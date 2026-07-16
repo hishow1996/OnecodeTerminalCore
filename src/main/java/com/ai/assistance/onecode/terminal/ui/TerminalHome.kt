@@ -2,6 +2,7 @@ package com.ai.assistance.onecode.terminal.ui
 
 import android.content.Context
 import android.os.Build
+import android.view.View
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -185,7 +186,20 @@ fun TerminalHome(
     val toggleTabBar: () -> Unit = { showTabBar = !showTabBar }
     val onEnterSend: () -> Unit = { env.onSendInput(env.command, true) }
 
-    // 方案C：外层用 Box 而非 Column。终端区域始终 fillMaxSize 整屏，
+    // 方案A：标签栏高度测量 → 给终端加 top padding 下推让位
+    var tabBarHeightPx by remember { mutableStateOf(0) }
+    val tabBarHeightDp by derivedStateOf { with(density) { tabBarHeightPx.toDp() } }
+
+    // 方案A：标签栏 toggle 时主动 GONE→VISIBLE 重建 SurfaceView，
+    // 解决 SurfaceView punch-hole 在 size 变化时不重同步导致内容空白的回归(b108c914)。
+    LaunchedEffect(showTabBar) {
+        terminalViewRef?.let { view ->
+            view.visibility = View.GONE
+            view.post { view.visibility = View.VISIBLE }
+        }
+    }
+
+    // 方案C变体：外层用 Box 而非 Column。终端区域始终 fillMaxSize 整屏，
     // 其 SurfaceView 的 punch-hole 不会因标签栏显隐触发 onSizeChanged 错位。
     // 标签栏作为 Box 第二层叠加浮在顶部（覆盖终端顶部约40dp，不再下推终端），
     // 彻底回避 SurfaceView 重布局引发的「punch-hole 挖空标签栏内容→空白盒子」回归。
@@ -196,11 +210,13 @@ fun TerminalHome(
             .windowInsetsPadding(WindowInsets.statusBars)
     ) {
 
-        if (env.isFullscreen) {
+if (env.isFullscreen) {
+            // 方案A：终端 Box 顶部加标签栏高度，下推让位
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
+                    .padding(top = if (showTabBar) tabBarHeightDp else 0.dp)
             ) {
                 CanvasTerminalScreen(
                     emulator = env.terminalEmulator,
@@ -260,11 +276,13 @@ fun TerminalHome(
                 }
             }
         } else {
+            // 方案A：终端 Column 顶部加标签栏高度，下推让位
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
                     .imePadding()
+                    .padding(top = if (showTabBar) tabBarHeightDp else 0.dp)
             ) {
                 AndroidView(
                     factory = { context ->
@@ -376,7 +394,7 @@ fun TerminalHome(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(Color.Black)
+.padding(top = if (showTabBar) tabBarHeightDp else 0.dp)
                             .padding(padding),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -472,14 +490,17 @@ fun TerminalHome(
         }
 
         // 会话标签页 - 作为 Box 叠加层（TopCenter），浮在终端顶部。
-        // 关键：标签栏显隐不再触发终端 SurfaceView 的 onSizeChanged，
-        // 因此 SurfaceView 的 punch-hole 不会被错位重组，标签栏内容可见。
-        // 视觉：呼出标签栏时覆盖终端顶部约 40dp，再按 ≡ 收起。
+        // 标签栏自身高度已测得(tabBarHeightDp)，终端 Box/Column 顶部已加
+        // padding(top=tabBarHeightDp) 下推让位，不再覆盖 onecode。
+        // 终端 padding 变化触发 SurfaceView onSizeChanged，但 LaunchedEffect
+        // 会在 showTabBar toggle 时主动 GONE→VISIBLE 重建 Surface，
+        // 重新同步 punch-hole，避开 b108c914 回归导致的内容空白。
         if (showTabBar) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
+                    .onSizeChanged { tabBarHeightPx = it.height }
             ) {
                 SessionTabBar(
                     sessions = env.sessions,
