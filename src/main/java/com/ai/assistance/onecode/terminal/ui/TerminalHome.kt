@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -57,10 +58,8 @@ import android.view.MotionEvent
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.isImeVisible
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.abs
@@ -70,14 +69,15 @@ import com.ai.assistance.onecode.terminal.view.SyntaxColors
 import com.ai.assistance.onecode.terminal.view.SyntaxHighlightingVisualTransformation
 import com.ai.assistance.onecode.terminal.view.highlight
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Tab
 import com.ai.assistance.onecode.terminal.view.canvas.CanvasTerminalScreen
 import com.ai.assistance.onecode.terminal.view.canvas.RenderConfig
 import com.ai.assistance.onecode.terminal.utils.TerminalFontConfigManager
 import android.graphics.Typeface
 import android.view.inputmethod.InputMethodManager
 import java.io.File
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 
+@OptIn(ExperimentalLayoutApi::class)
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun TerminalHome(
@@ -121,6 +121,11 @@ fun TerminalHome(
     var imeShown by remember { mutableStateOf(false) }
     var terminalViewRef by remember { mutableStateOf<CanvasTerminalView?>(null) }
 
+    // 真实 IME 显示状态：跟随 WindowInsets，避免手动 Boolean 与实际不同步
+    val imeVisible = WindowInsets.isImeVisible
+    LaunchedEffect(imeVisible) {
+        imeShown = imeVisible
+    }
 
 
     // 语法高亮
@@ -136,8 +141,6 @@ fun TerminalHome(
     // 非全屏模式下虚拟键盘显示状态
     var showVirtualKeyboard by remember { mutableStateOf(false) }
     var isDirectInputMode by remember { mutableStateOf(false) }
-    // 会话标签页默认隐藏，由功能区按钮呼出/隐藏
-    var showSessionTabs by remember { mutableStateOf(false) }
 
     // 进入 opencode (alt screen/fullscreen) 时自动切到直输模式，显示定制快捷栏
     LaunchedEffect(env.isFullscreen) {
@@ -161,38 +164,48 @@ fun TerminalHome(
         env.sessions.find { it.id == env.currentSessionId }?.pty
     }
 
+    val density = LocalDensity.current
+    // 悬浮输入栏自身高度（不含 IME 内边距）。内容区底部按此预留空白，避免悬浮栏挡住内容；
+    // 仅随栏内按钮行数变化、不随 IME 起落动画变化——保证 SurfaceView 尺寸在键盘动画期间稳定，
+    // 不再逐帧 resize/重排，配合 CanvasTerminalView 的去抖一次性提交 SIGWINCH，
+    // 消除键盘起落时“内容出现两个/排版错乱/卡顿”。
+    var inputBarHeight by remember { mutableStateOf(0) }
+    val inputBarBottomPadding = with(density) { inputBarHeight.toDp() }
+    // 悬浮输入栏 modifier：对齐到 Box 底部、跟随 IME 上沿、测量自身高度以反哺内容区底部留白。
+    // align 是 BoxScope 扩展，必须在每个 Box 内各自声明。
+    val floatingBarModifier: Modifier = Modifier
+        .fillMaxWidth()
+        .onSizeChanged { inputBarHeight = it.height }
+        .imePadding()
+    
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 会话标签页（由功能区按钮呼出/隐藏，默认隐藏）
-        if (showSessionTabs) {
-            SessionTabBar(
-                sessions = env.sessions,
-                currentSessionId = env.currentSessionId,
-                onSessionClick = env::onSwitchSession,
-                onNewSession = env::onNewSession,
-                onCloseSession = { sessionId ->
-                    sessionToDelete = sessionId
-                    showDeleteConfirmDialog = true
-                }
-            )
-        } else {
-            // 标签栏隐藏时仍保留刘海高度占位，避免 onecode 标题被刘海遮挡
-            Spacer(Modifier.statusBarsPadding().fillMaxWidth())
-        }
+        // 会话标签页
+        SessionTabBar(
+            sessions = env.sessions,
+            currentSessionId = env.currentSessionId,
+            onSessionClick = env::onSwitchSession,
+            onNewSession = env::onNewSession,
+            onCloseSession = { sessionId ->
+                sessionToDelete = sessionId
+                showDeleteConfirmDialog = true
+            }
+        )
 
         if (env.isFullscreen) {
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding()
             ) {
                 CanvasTerminalScreen(
                     emulator = env.terminalEmulator,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = inputBarBottomPadding),
                     config = fontConfig,
                     pty = currentPty,
                     onInput = { env.onSendInput(it, false) },
@@ -202,7 +215,8 @@ fun TerminalHome(
                     onViewReady = { terminalViewRef = it }
                 )
 
-                if (isDirectInputMode) {
+                Box(modifier = Modifier.align(Alignment.BottomStart).then(floatingBarModifier)) {
+                    if (isDirectInputMode) {
                     DirectInputCompactBar(
                         onKeyPress = { key -> env.onSendInput(key, false) },
                         onInterrupt = env::onInterrupt,
@@ -210,6 +224,7 @@ fun TerminalHome(
                             isDirectInputMode = false
                             showVirtualKeyboard = false
                             imeShown = false
+                            terminalViewRef?.setModifierState(false, false)
                         },
                         onToggleIme = {
                             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -229,9 +244,9 @@ fun TerminalHome(
                             }
                         },
                         switchAction = { env.onSendInput("\t", false) },
-                        onToggleTabs = { showSessionTabs = !showSessionTabs },
                         fontSize = fontSize * 0.85f,
-                        padding = padding * 0.7f
+                        padding = padding * 0.7f,
+                        onModifierChanged = { ctrl, alt -> terminalViewRef?.setModifierState(ctrl, alt) }
                     )
                 } else {
                     VirtualKeyboard(
@@ -240,13 +255,13 @@ fun TerminalHome(
                         padding = padding * 0.7f
                     )
                 }
+                }
             }
         } else {
-            Column(
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black)
-                    .imePadding()
             ) {
                 AndroidView(
                     factory = { context ->
@@ -295,11 +310,13 @@ fun TerminalHome(
                         view.stopRenderThread()
                     },
                     modifier = Modifier
-                        .weight(1f)
+                        .fillMaxSize()
+                        .padding(bottom = inputBarBottomPadding)
                         .background(Color.Black)
                 )
 
-                if (isDirectInputMode) {
+                Box(modifier = Modifier.align(Alignment.BottomStart).then(floatingBarModifier)) {
+                    if (isDirectInputMode) {
                     DirectInputCompactBar(
                         onKeyPress = { key -> env.onSendInput(key, false) },
                         onInterrupt = env::onInterrupt,
@@ -307,6 +324,7 @@ fun TerminalHome(
                             isDirectInputMode = false
                             showVirtualKeyboard = false
                             imeShown = false
+                            terminalViewRef?.setModifierState(false, false)
                         },
                         onToggleIme = {
                             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
@@ -335,21 +353,20 @@ fun TerminalHome(
                                 imeShown = false
                             }
                         },
-                        onToggleTabs = { showSessionTabs = !showSessionTabs },
                         fontSize = fontSize * 0.85f,
-                        padding = padding * 0.7f
+                        padding = padding * 0.7f,
+                        onModifierChanged = { ctrl, alt -> terminalViewRef?.setModifierState(ctrl, alt) }
                     )
                 } else {
                     // 终端工具栏
                     TerminalToolbar(
                         onInterrupt = env::onInterrupt,
-                        onEnter = { env.onSendInput(env.command, true) },
+                        onEnter = { env.onSendInput("\r", false) },
                         onSendCommand = { env.onSendInput(it, true) },
                         fontSize = fontSize * 0.8f,
                         padding = padding,
                         onNavigateToSetup = onNavigateToSetup,
-                        onNavigateToSettings = onNavigateToSettings,
-                        onToggleTabs = { showSessionTabs = !showSessionTabs }
+                        onNavigateToSettings = onNavigateToSettings
                     )
 
                     // 当前输入行
@@ -448,6 +465,7 @@ fun TerminalHome(
                         )
                     }
                 }
+                }
             }
         }
     }
@@ -528,9 +546,7 @@ private fun SessionTabBar(
     onCloseSession: (String) -> Unit
 ) {
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .statusBarsPadding(),
+        modifier = Modifier.fillMaxWidth(),
         color = Color(0xFF2D2D2D)
     ) {
         Row(
@@ -628,8 +644,7 @@ private fun TerminalToolbar(
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
     onNavigateToSetup: () -> Unit,
-    onNavigateToSettings: () -> Unit,
-    onToggleTabs: () -> Unit
+    onNavigateToSettings: () -> Unit
 ) {
     val context = LocalContext.current
     Surface(
@@ -684,22 +699,6 @@ private fun TerminalToolbar(
                     fontSize = fontSize,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(horizontal = padding * 0.75f, vertical = padding * 0.4f)
-                )
-            }
-
-            // 标签页呼出/隐藏按钮（Enter 旁，点击切换会话标签栏）
-            Surface(
-                modifier = Modifier.clickable { onToggleTabs() },
-                color = Color(0xFF4A4A4A),
-                shape = RoundedCornerShape(6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Tab,
-                    contentDescription = "标签页",
-                    tint = Color.White,
-                    modifier = Modifier
-                        .padding(horizontal = padding * 0.75f, vertical = padding * 0.45f)
-                        .size(fontSize.value.dp * 1.1f)
                 )
             }
 
@@ -920,10 +919,10 @@ private fun DirectInputCompactBar(
     onExitDirectMode: () -> Unit,
     onToggleIme: () -> Unit,
     switchAction: () -> Unit,
-    onToggleTabs: () -> Unit,
     fontSize: androidx.compose.ui.unit.TextUnit,
     padding: androidx.compose.ui.unit.Dp,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onModifierChanged: (Boolean, Boolean) -> Unit = { _, _ -> }
 ) {
     var ctrlActive by remember { mutableStateOf(false) }
     var altActive by remember { mutableStateOf(false) }
@@ -938,9 +937,11 @@ private fun DirectInputCompactBar(
                 onKeyPress(key)
             }
             ctrlActive = false
+            onModifierChanged(false, altActive)
         } else if (altActive) {
             onKeyPress("\u001b$key")
             altActive = false
+            onModifierChanged(ctrlActive, false)
         } else {
             onKeyPress(key)
         }
@@ -956,35 +957,14 @@ private fun DirectInputCompactBar(
                 .padding(horizontal = padding * 0.5f, vertical = padding * 0.3f),
             verticalArrangement = Arrangement.spacedBy(padding * 0.3f)
         ) {
-            // 第1行：ESC  /  ⓘ标签页  HOME  ↑  END  PGUP  ⌨(橙)
+            // 第1行：ESC  /  Tab  HOME  ↑  END  PGUP  ⌨(橙)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(padding * 0.3f)
             ) {
                 KeyButton("ESC", "\u001b", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("/", "/", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
-                // Tab 改为标签页呼出/隐藏快捷键（图标）
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .defaultMinSize(minHeight = 44.dp)
-                        .clickable { onToggleTabs() },
-                    color = Color(0xFF3A3A3A),
-                    shape = RoundedCornerShape(4.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .padding(horizontal = padding * 0.5f, vertical = padding * 1.2f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Tab,
-                            contentDescription = "标签页",
-                            tint = Color.White,
-                            modifier = Modifier.size(fontSize.value.dp * 1.1f)
-                        )
-                    }
-                }
+                KeyButton("Tab", "\t", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("HOME", "\u001b[H", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↑", "\u001b[A", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("END", "\u001b[F", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
@@ -1020,8 +1000,8 @@ private fun DirectInputCompactBar(
                         )
                     }
                 }
-                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive }, modifier = Modifier.weight(1f))
-                ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive }, modifier = Modifier.weight(1f))
+                ModifierKeyButton("CTRL", fontSize, padding, ctrlActive, { ctrlActive = !ctrlActive; onModifierChanged(ctrlActive, altActive) }, modifier = Modifier.weight(1f))
+                ModifierKeyButton("ALT", fontSize, padding, altActive, { altActive = !altActive; onModifierChanged(ctrlActive, altActive) }, modifier = Modifier.weight(1f))
                 KeyButton("←", "\u001b[D", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("↓", "\u001b[B", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
                 KeyButton("→", "\u001b[C", fontSize, padding, handleKeyPress, modifier = Modifier.weight(1f))
