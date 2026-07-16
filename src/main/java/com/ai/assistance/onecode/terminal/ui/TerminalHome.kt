@@ -58,8 +58,10 @@ import android.view.MotionEvent
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.windowInsetsPadding
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.abs
@@ -190,6 +192,7 @@ fun TerminalHome(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .windowInsetsPadding(WindowInsets.displayCutout)
     ) {
         // 会话标签页（可由功能栏/直输快捷栏按钮呼出与收起）
         AnimatedVisibility(
