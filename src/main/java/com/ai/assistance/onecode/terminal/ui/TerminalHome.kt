@@ -183,8 +183,8 @@ fun TerminalHome(
         .onSizeChanged { inputBarHeight = it.height }
         .imePadding()
 
-    // 顶部标签页栏显隐：默认显示；由功能栏/直输快捷栏里的按钮呼出与收起。
-    var showTabBar by remember { mutableStateOf(true) }
+    // 顶部标签页栏显隐：默认隐藏；由功能栏/直输快捷栏里的按钮呼出与收起。
+    var showTabBar by remember { mutableStateOf(false) }
     val toggleTabBar: () -> Unit = { showTabBar = !showTabBar }
     val onEnterSend: () -> Unit = { env.onSendInput(env.command, true) }
 
@@ -192,7 +192,7 @@ fun TerminalHome(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .windowInsetsPadding(WindowInsets.displayCutout)
+            .windowInsetsPadding(WindowInsets.statusBars)
     ) {
         // 会话标签页（可由功能栏/直输快捷栏按钮呼出与收起）
         AnimatedVisibility(
