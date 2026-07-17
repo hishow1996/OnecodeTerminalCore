@@ -1,1930 +1,702 @@
-package com.ai.assistance.onecode.terminal.view.canvas
+package com.ai.assistance.onecode.terminal.view.domain
 
-import android.content.Context
-import android.graphics.*
-import android.util.AttributeSet
-import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import android.util.Log
-import android.view.ActionMode
-import android.view.Menu
-import android.view.MenuItem
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.view.inputmethod.BaseInputConnection
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputConnection
-import android.view.inputmethod.InputMethodManager
-import android.view.KeyEvent
-import android.os.Handler
-import android.os.Looper
-import android.widget.OverScroller
-import android.view.accessibility.AccessibilityManager
-import com.ai.assistance.onecode.terminal.view.domain.ansi.AnsiTerminalEmulator
-import com.ai.assistance.onecode.terminal.view.domain.ansi.RenderState
-import com.ai.assistance.onecode.terminal.view.domain.ansi.TerminalChar
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.roundToInt
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.math.abs
-import java.io.File
-import com.ai.assistance.onecode.terminal.R
+import com.ai.assistance.onecode.terminal.CommandExecutionEvent
+import com.ai.assistance.onecode.terminal.SessionDirectoryEvent
+import com.ai.assistance.onecode.terminal.SessionManager
+import com.ai.assistance.onecode.terminal.data.SessionInitState
+import com.ai.assistance.onecode.terminal.data.TerminalSessionData
+import com.ai.assistance.onecode.terminal.view.domain.ansi.AnsiUtils
 
 /**
- * 基于Canvas的高性能终端视图
- * 使用SurfaceView + 独立渲染线程实现
+ * 终端输出的会话处理状态
+ * @property justHandledCarriageReturn 如果最近处理的行分隔符是回车符（CR），则为 true
  */
-class CanvasTerminalView @JvmOverloads constructor(
-    context: Context,
-    attrs: AttributeSet? = null,
-    defStyleAttr: Int = 0
-) : SurfaceView(context, attrs, defStyleAttr), SurfaceHolder.Callback {
-    
-    // 渲染配置
-    private var config = RenderConfig()
-    
-    // 暂停控制
-    private val pauseLock = Object()
-    @Volatile
-    private var isPaused = false
-    
-    // Paint对象（复用以提高性能）
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        typeface = Typeface.MONOSPACE
-        textSize = config.fontSize
-    }
-    
-    private val bgPaint = Paint().apply {
-        style = Paint.Style.FILL
-    }
-    
-    private val cursorPaint = Paint().apply {
-        color = Color.GREEN
-        alpha = 180
-        style = Paint.Style.FILL
-    }
-    
-    private val selectionPaint = Paint().apply {
-        color = Color.argb(100, 100, 149, 237)
-        style = Paint.Style.FILL
-    }
-    
-    private val handlePaint = Paint().apply {
-        color = Color.rgb(100, 149, 237)
-        style = Paint.Style.FILL
-        isAntiAlias = true
-    }
-    
-    private val handleStrokePaint = Paint().apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-        isAntiAlias = true
-    }
-    
-    // 文本测量工具
-    private val textMetrics: TextMetrics
-    
-    // 终端模拟器
-    private var emulator: AnsiTerminalEmulator? = null
-    private var emulatorChangeListener: (() -> Unit)? = null
-    private var emulatorNewOutputListener: (() -> Unit)? = null
-    
-    // 是否自动滚动到底部（当新内容到达时）
-    private var autoScrollToBottom = true
-    // 用户是否正在手动滚动
-    private var isUserScrolling = false
-    // 是否需要滚动到底部（在渲染时执行）
-    private var needScrollToBottom = false
-    
-    // PTY 引用（用于窗口大小同步）
-    private var pty: com.ai.assistance.onecode.terminal.Pty? = null
-    
-    // 渲染线程
-    private var renderThread: RenderThread? = null
-    private val renderLock = ReentrantLock()
-    private val renderCondition = renderLock.newCondition()
-    private var isDirty = true // 是否需要重绘
-    
-    // 光标闪烁
-    private var cursorBlinkOn = true
-    private val cursorBlinkRate = 500L
-    private var lastCursorBlinkTime = 0L
-    
-    // 手势处理
-    private lateinit var gestureHandler: GestureHandler
-    private val selectionManager = TextSelectionManager()
-    
-    // 缩放因子
-    private var scaleFactor = 1f
-        set(value) {
-            // 仅跟手放大字号并重测字体指标、立即重绘；
-            // 不在此触发 updateTerminalSize（resize + SIGWINCH），那留给手势 onScaleEnd 一次性执行。
-            field = value.coerceIn(0.5f, 3f)
-            reloadFontMetrics()
-        }
-    
-    // 滚动偏移（主线程手势回调写、渲染线程读，加 volatile 保证可见）
-    @Volatile
-    private var scrollOffsetY = 0f
-    
-    // 惯性滚动处理器
-    private val scroller: OverScroller by lazy { OverScroller(context) }
-    
-    // 输入回调
-    private var inputCallback: ((String) -> Unit)? = null
-    
-    // 点击请求显示键盘的回调（非全屏模式下由上层控制）
-    private var onRequestShowKeyboard: (() -> Unit)? = null
-    
-    // 会话ID和滚动位置回调
-    private var sessionId: String? = null
-    private var onScrollOffsetChanged: ((String, Float) -> Unit)? = null
-    private var getScrollOffset: ((String) -> Float)? = null
-    
-    // 缓存终端尺寸，避免重复调用
-    private var cachedRows = 0
-    private var cachedCols = 0
+private data class SessionProcessingState(
+    var justHandledCarriageReturn: Boolean = false
+)
 
-    // === 键盘起落/布局连续变化时的 resize+SIGWINCH 去抖 ===
-    // adjustResize 下键盘动画过程高度每帧变化，若每帧 emulator.resize + setWindowSize，
-    // 终端 TUI(opencode) 会收到一连串 SIGWINCH、用过期列数反复重排，上一帧旧布局与新布局
-    // 交替浮现 → "上下移动看到内容两次"。这里把真正的 resize+SIGWINCH 延后到尺寸稳定
-    // 一小段窗口后再执行一次，消除中间逐帧重排。
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val resizeDebounceMs = 80L
-    private var pendingCols = -1
-    private var pendingRows = -1
-    private var pendingWidth = 0
-    private var pendingHeight = 0
-    private var pendingScrollRows = 0f
-    private val resizeCommitRunnable = Runnable { commitPendingResize() }
-    
-    // 临时字符缓冲区，用于避免 drawChar 中的 String 分配
-    private val tempCharBuffer = CharArray(1)
-    
-    // 文本选择ActionMode
-    private var actionMode: ActionMode? = null
-    
-    // 全屏模式标记
-    private var isFullscreenMode = true
-    
-    // 方向键长按处理
-    private val handler = Handler(Looper.getMainLooper())
-    private var currentArrowKey: Int? = null
-    private var arrowKeyRepeatRunnable: Runnable? = null
-    private var isArrowKeyPressed = false
-    private val longPressDelay = 500L // 长按延迟时间（毫秒）
-    private val repeatInterval = 200L // 重复发送间隔（毫秒）
-    
-    // 无障碍支持
-    private val terminalAccessibilityDelegate: TerminalAccessibilityDelegate
-    
-    init {
-        holder.addCallback(this)
-        setWillNotDraw(false)
-        
-        // 使视图可以获得焦点以接收输入法输入
-        isFocusable = true
-        isFocusableInTouchMode = true
-        
-        // 初始化文本指标
-        textMetrics = TextMetrics(textPaint, config)
-        
-        // 加载并应用字体
-        loadAndApplyFont()
-        
-        // 初始化手势处理器
-        initGestureHandler()
-        
-        // 初始化无障碍支持
-        terminalAccessibilityDelegate = TerminalAccessibilityDelegate(
-            view = this,
-            getEmulator = { emulator },
-            getTextMetrics = { textMetrics },
-            getScrollOffsetY = { scrollOffsetY }
-        )
-        accessibilityDelegate = terminalAccessibilityDelegate
-        
-        // 重要：启用accessibility以让系统识别虚拟节点
-        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
-        
-        // 回退：移除可能导致卡顿的 ZOrderMediaOverlay 设置
-        // 保持默认的 SurfaceView 行为
+/**
+ * 终端输出处理器
+ * 负责处理和解析终端输出，更新会话状态
+ */
+class OutputProcessor(
+    private val onCommandExecutionEvent: (CommandExecutionEvent) -> Unit = {},
+    private val onDirectoryChangeEvent: (SessionDirectoryEvent) -> Unit = {},
+    private val onCommandCompleted: (String) -> Unit = {}
+) {
+
+    private val sessionStates = mutableMapOf<String, SessionProcessingState>()
+
+    companion object {
+        private const val TAG = "OutputProcessor"
+        private const val MAX_LINES_PER_HISTORY_ITEM = 10
     }
 
-    private fun isAccessibilityEnabled(): Boolean {
-        val manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
-        return manager?.isEnabled == true
-    }
-    
     /**
-     * 加载并应用字体
+     * 处理终端输出
      */
-    private fun loadAndApplyFont() {
-        // 主字体已由 config.typeface 提供，直接应用
-        textMetrics.updateFromRenderConfig(config)
-
-        // 加载 Nerd Font (如果路径在 config 中未指定，则使用默认资源)
-        val nerdFontResId = R.font.jetbrains_mono_nerd_font_regular
-        val nerdTypeface = try {
-            // 优先从 config 的 nerdFontPath 加载
-            config.nerdFontPath?.let { path ->
-                val file = File(path)
-                if (file.exists() && file.isFile) {
-                    Typeface.createFromFile(file)
-                } else {
-                    // 如果路径无效，尝试加载默认资源
-                    resources.getFont(nerdFontResId)
-                }
-            } ?: resources.getFont(nerdFontResId) // 如果路径为空，直接加载默认资源
-        } catch (e: Exception) {
-            // 加载失败
-            null
-        }
-        textMetrics.setNerdTypeface(nerdTypeface)
-    }
-    
-    private fun initGestureHandler() {
-        gestureHandler = GestureHandler(
-            context = context,
-            onScale = { scale ->
-                scaleFactor *= scale
-                requestRender()
-            },
-            onScaleEnd = {
-                // 手势结束才一次性同步终端尺寸（resize + SIGWINCH），即时生效
-                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
-                requestRender()
-            },
-            onScroll = { _, distanceY ->
-                if (!selectionManager.hasSelection()) {
-                    // 手动滚动时停止惯性滚动
-                    if (!scroller.isFinished) {
-                        scroller.abortAnimation()
-                    }
-                    // 取消任何挂起的 resize 去抖回调，避免手势期间 80ms 后 commitPendingResize
-                    // 把 scrollOffsetY 用过期比例重算覆盖刚写入的手势偏移，造成抖动。
-                    mainHandler.removeCallbacks(resizeCommitRunnable)
-                    
-                    scrollOffsetY += distanceY
-                    scrollOffsetY = scrollOffsetY.coerceAtLeast(0f)
-                    
-                    // 保存滚动位置
-                    sessionId?.let { id ->
-                        onScrollOffsetChanged?.invoke(id, scrollOffsetY)
-                    }
-                    
-                    // 用户手动滚动，检测是否在底部
-                    if (scrollOffsetY > 0f) {
-                        isUserScrolling = true
-                    } else {
-                        // 滚动到底部，恢复自动滚动
-                        isUserScrolling = false
-                    }
-                    
-                    requestRender()
-                }
-            },
-            onFling = { velocityX, velocityY ->
-                if (!selectionManager.hasSelection()) {
-                    // 开始惯性滚动
-                    val em = emulator ?: return@GestureHandler
-                    val fullContent = em.getFullContentSnapshot()
-                    val charHeight = textMetrics.charHeight
-                    val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
-                    val maxScrollOffset = max(0f, fullContent.size * charHeight - availH).toInt()
-                    
-                    scroller.fling(
-                        0, scrollOffsetY.toInt(),  // 起始位置
-                        0, (-velocityY).toInt(),    // 速度（Y方向反转）
-                        0, 0,                        // X范围
-                        0, maxScrollOffset           // Y范围
-                    )
-                    requestRender()
-                }
-            },
-            onDoubleTap = { x, y ->
-                selectWordAt(x, y)
-            },
-            onLongPress = { x, y ->
-                startTextSelection(x, y)
-            }
-        )
-    }
-    
-    /**
-     * 设置终端模拟器
-     */
-    fun setEmulator(emulator: AnsiTerminalEmulator) {
-        // 保存当前模拟器的滚动位置
-        sessionId?.let { id ->
-            onScrollOffsetChanged?.invoke(id, scrollOffsetY)
-        }
-
-        // 移除旧的监听器
-        this.emulator?.let { oldEmulator ->
-            emulatorChangeListener?.let { listener ->
-                oldEmulator.removeChangeListener(listener)
-            }
-            emulatorNewOutputListener?.let { listener ->
-                oldEmulator.removeNewOutputListener(listener)
-            }
-        }
-        
-        this.emulator = emulator
-        // 恢复新模拟器的滚动位置
-        sessionId?.let { id ->
-            getScrollOffset?.invoke(id)?.let { offset ->
-                scrollOffsetY = offset
-            }
-        }
-        
-        // 添加新的监听器
-        emulatorChangeListener = {
-            isDirty = true
-            cursorBlinkOn = true
-            lastCursorBlinkTime = System.currentTimeMillis()
-            requestRender()
-            // 通知无障碍服务内容已更新
-            // 直接使用成员变量以兼容 API < 29 (getAccessibilityDelegate 是 API 29+)
-            terminalAccessibilityDelegate.notifyContentChanged()
-        }
-        emulator.addChangeListener(emulatorChangeListener!!)
-        
-        // 添加新输出监听器（用于自动滚动到底部）
-        emulatorNewOutputListener = {
-            if (autoScrollToBottom) {
-                scrollToBottom()
-            }
-        }
-        emulator.addNewOutputListener {
-            post {
-                emulatorNewOutputListener?.invoke()
-            }
-        }
-        
-        // 如果 Surface 已经创建，立即同步终端大小
-        if (width > 0 && height > 0) {
-            updateTerminalSize(width, height)
-        }
-        
-        requestRender()
-    }
-    
-    /**
-     * 设置滚动偏移（用于恢复会话滚动位置）
-     */
-    fun setScrollOffset(offset: Float) {
-        scrollOffsetY = offset.coerceAtLeast(0f)
-        requestRender()
-    }
-    
-    /**
-     * 获取当前滚动偏移（用于保存会话滚动位置）
-     */
-    fun getScrollOffset(): Float = scrollOffsetY
-    
-    /**
-     * 滚动到底部
-     */
-    fun scrollToBottom() {
-        needScrollToBottom = true
-        isUserScrolling = false // 恢复自动滚动
-        isDirty = true
-        requestRender()
-    }
-    
-    /**
-     * 设置 PTY（用于窗口大小同步）
-     */
-    fun setPty(pty: com.ai.assistance.onecode.terminal.Pty?) {
-        this.pty = pty
-        // 如果 Surface 已经创建且有 emulator，立即同步终端大小
-        if (width > 0 && height > 0 && emulator != null) {
-            updateTerminalSize(width, height)
-        }
-    }
-    
-    /**
-     * 设置全屏模式
-     */
-    fun setFullscreenMode(isFullscreen: Boolean) {
-        isFullscreenMode = isFullscreen
-        // 非全屏模式下禁用焦点和输入法
-        isFocusable = isFullscreen
-        isFocusableInTouchMode = isFullscreen
-    }
-    
-    /**
-     * 设置输入回调
-     */
-    fun setInputCallback(callback: (String) -> Unit) {
-        this.inputCallback = callback
-    }
-    
-    /**
-     * 设置点击时请求显示软键盘的回调（仅非全屏模式使用）
-     */
-    fun setOnRequestShowKeyboard(callback: (() -> Unit)?) {
-        this.onRequestShowKeyboard = callback
-    }
-    
-    /**
-     * 设置会话ID和滚动位置回调
-     */
-    fun setSessionScrollCallbacks(
-        sessionId: String?,
-        onScrollOffsetChanged: ((String, Float) -> Unit)?,
-        getScrollOffset: ((String) -> Float)?
+    fun processOutput(
+        sessionId: String,
+        chunk: String,
+        sessionManager: SessionManager
     ) {
-        this.sessionId = sessionId
-        this.onScrollOffsetChanged = onScrollOffsetChanged
-        this.getScrollOffset = getScrollOffset
-        
-        // 如果设置了sessionId，立即恢复滚动位置
-        sessionId?.let { id ->
-            getScrollOffset?.invoke(id)?.let { offset ->
-                scrollOffsetY = offset
-                requestRender()
-            }
+        val session = sessionManager.getSession(sessionId) ?: return
+        session.rawBuffer.append(chunk)
+
+        Log.d(TAG, "Processing chunk for session $sessionId. New buffer size: ${session.rawBuffer.length}")
+
+        // 始终检查全屏模式切换
+        if (detectFullscreenMode(sessionId, session.rawBuffer, sessionManager)) {
+            // 如果检测到模式切换，缓冲区可能已被修改，及早返回以处理下一个块
+            return
         }
-    }
-    
-    /**
-     * 设置缩放回调
-     */
-    fun setScaleCallback(callback: (Float) -> Unit) {
-        // 当缩放因子变化时调用
-        gestureHandler = GestureHandler(
-            context = context,
-            onScale = { scale ->
-                // 手势过程中只跟手放大字号、即时重绘；不触发 resize + SIGWINCH，
-                // 避免每帧 resize 与 TUI 互相竞争导致 opencode 按陈旧列数排版、右边内容丢失。
-                scaleFactor *= scale
-                callback(scaleFactor)
-                requestRender()
-            },
-            onScaleEnd = {
-                // 手势结束才一次性把积累的字号同步给终端：resize emulator + setWindowSize(=SIGWINCH)，
-                // 让 opencode 收到稳定单一的新列数后自行清屏重绘。即时生效，不等去抖。
-                updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
-                requestRender()
-            },
-            onScroll = { _, distanceY ->
-                if (!selectionManager.hasSelection()) {
-                    // 手动滚动时停止惯性滚动
-                    if (!scroller.isFinished) {
-                        scroller.abortAnimation()
-                    }
-                    // 取消任何挂起的 resize 去抖回调，避免手势期间 80ms 后 commitPendingResize
-                    // 把 scrollOffsetY 用过期比例重算覆盖刚写入的手势偏移，造成抖动。
-                    mainHandler.removeCallbacks(resizeCommitRunnable)
+
+        // 始终更新 ANSI 解析器（用于 Canvas 渲染），包括初始化阶段
+        // 这样用户可以看到初始化过程中的所有输出，包括错误信息
+        session.ansiParser.parse(chunk)
+        
+        // 如果在全屏模式下，跳过行解析逻辑（全屏应用自己管理屏幕）
+        if (session.isFullscreen) {
+            // 不需要再次解析，ansiParser 已经更新
+            return
+        }
+
+        val state = sessionStates.getOrPut(sessionId) { SessionProcessingState() }
+
+        // 从缓冲区中提取并处理行
+        while (session.rawBuffer.isNotEmpty()) {
+            val bufferContent = session.rawBuffer.toString()
+            val newlineIndex = bufferContent.indexOf('\n')
+            val carriageReturnIndex = bufferContent.indexOf('\r')
+
+            if (carriageReturnIndex != -1 && (newlineIndex == -1 || carriageReturnIndex < newlineIndex)) {
+                // We have a carriage return.
+                val line = bufferContent.substring(0, carriageReturnIndex)
+
+                val isCRLF = carriageReturnIndex + 1 < bufferContent.length && bufferContent[carriageReturnIndex + 1] == '\n'
+                val consumedLength = if (isCRLF) carriageReturnIndex + 2 else carriageReturnIndex + 1
+
+                session.rawBuffer.delete(0, consumedLength)
+
+                if (isCRLF) {
+                    // It's a CRLF, treat as a normal line. `processLine` will handle the
+                    // case where this CRLF finalizes a progress-updated line.
+                    Log.d(TAG, "Processing CRLF line: '$line'")
+                    processLine(sessionId, line, sessionManager)
+                } else {
+                    // It's just CR, treat as a progress update.
+                    Log.d(TAG, "Processing CR line: '$line'")
+                    handleCarriageReturn(sessionId, line, sessionManager)
+                }
+            } else if (newlineIndex != -1) {
+                // We have a newline without a preceding carriage return.
+                val line = bufferContent.substring(0, newlineIndex)
+                session.rawBuffer.delete(0, newlineIndex + 1)
+                Log.d(TAG, "Processing LF line: '$line'")
+                processLine(sessionId, line, sessionManager)
+            } else {
+                // No full line-terminator found in the buffer.
+                
+                // 首先检查是否是进度行（优先级最高，避免被误判为提示符）
+                if (AnsiUtils.isProgressLine(bufferContent)) {
+                    Log.d(TAG, "Detected progress line in buffer: '$bufferContent'")
+                    val cleanContent = AnsiUtils.stripAnsi(bufferContent)
+                    Log.d(TAG, "Stripped progress line: '$cleanContent'")
+                    handleCarriageReturn(sessionId, bufferContent, sessionManager)
+                    session.rawBuffer.clear()
+                    continue // Re-check buffer in case more data came in
+                }
+                
+                // 然后检查是否是提示符
+                val cleanContent = AnsiUtils.stripAnsi(bufferContent)
+                
+                // 检查是否是普通 shell 提示符
+                val isShellPrompt = isPrompt(cleanContent)
+                
+                // 使用 PTY 模式检测是否在等待输入
+                val isWaitingInput = isInteractivePrompt(cleanContent, sessionId, sessionManager)
+                
+                if (isShellPrompt || isWaitingInput) {
+                    Log.d(TAG, "Processing remaining buffer as interactive/shell prompt: '$bufferContent'")
+                    // Since this is not a newline-terminated line, the justHandledCarriageReturn
+                    // state from a previous CR is not relevant here. We reset it to ensure
+                    // the prompt is processed correctly by handleReadyState.
+                    state.justHandledCarriageReturn = false
                     
-                    scrollOffsetY += distanceY
-                    scrollOffsetY = scrollOffsetY.coerceAtLeast(0f)
-                    
-                    // 保存滚动位置
-                    sessionId?.let { id ->
-                        onScrollOffsetChanged?.invoke(id, scrollOffsetY)
-                    }
-                    
-                    // 用户手动滚动，检测是否在底部
-                    if (scrollOffsetY > 0f) {
-                        isUserScrolling = true
+                    // 如果是交互式提示符（非普通 shell 提示符），进入交互模式
+                    if (isWaitingInput && !isShellPrompt) {
+                        handleInteractivePrompt(sessionId, cleanContent, sessionManager)
                     } else {
-                        // 滚动到底部，恢复自动滚动
-                        isUserScrolling = false
+                        processLine(sessionId, bufferContent, sessionManager)
                     }
-                    
-                    requestRender()
+                    session.rawBuffer.clear()
                 }
-            },
-            onFling = { velocityX, velocityY ->
-                if (!selectionManager.hasSelection()) {
-                    // 开始惯性滚动
-                    val em = emulator ?: return@GestureHandler
-                    val fullContent = em.getFullContentSnapshot()
-                    val charHeight = textMetrics.charHeight
-                    val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
-                    val maxScrollOffset = max(0f, fullContent.size * charHeight - availH).toInt()
-                    
-                    scroller.fling(
-                        0, scrollOffsetY.toInt(),  // 起始位置
-                        0, (-velocityY).toInt(),    // 速度（Y方向反转）
-                        0, 0,                        // X范围
-                        0, maxScrollOffset           // Y范围
-                    )
-                    requestRender()
-                }
-            },
-            onDoubleTap = { x, y ->
-                selectWordAt(x, y)
-            },
-            onLongPress = { x, y ->
-                startTextSelection(x, y)
-            }
-        )
-    }
-    
-    /**
-     * 设置性能监控回调
-     */
-    fun setPerformanceCallback(callback: (fps: Float, frameTime: Long) -> Unit) {
-        // 性能监控逻辑可以在RenderThread中实现
-        // 这里暂时留空，可以后续扩展
-    }
-    
-    /**
-     * 设置渲染配置
-     */
-    fun setConfig(newConfig: RenderConfig) {
-        val oldTypeface = config.typeface
-        val oldNerdFontPath = config.nerdFontPath
-        val oldFontSize = config.fontSize
-
-        // 更新配置
-        config = newConfig
-
-        // 如果字体或字体大小改变了，重新加载并更新指标
-        if (oldTypeface != newConfig.typeface ||
-            oldNerdFontPath != newConfig.nerdFontPath ||
-            oldFontSize != newConfig.fontSize
-        ) {
-            loadAndApplyFont()
-            updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
-            requestRender()
-        } else {
-            // 其他配置改变，也需要重新渲染
-            requestRender()
-        }
-    }
-    
-    /**
-     * 更新字体大小
-     */
-    private fun updateFontSize() {
-        // 字体大小的更新现在由 textMetrics.updateFromRenderConfig 处理
-        // 这里可以保留用于缩放手势等场景
-        textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
-        updateTerminalSize(holder.surfaceFrame.width(), holder.surfaceFrame.height(), immediate = true)
-        requestRender()
-    }
-
-    /**
-     * 仅按当前 scaleFactor 重测字体指标并请求重绘，不触发 updateTerminalSize。
-     * 给 pinch 跟手预览用：避免手势过程中每帧 resize + SIGWINCH 与 TUI 抢占导致错位。
-     * 真正的 resize + SIGWINCH 留到 [setScaleCallback] 的 onScaleEnd 一次性执行。
-     */
-    private fun reloadFontMetrics() {
-        textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
-        requestRender()
-    }
-    
-    /**
-     * 请求渲染
-     */
-    private fun requestRender() {
-        isDirty = true
-    }
-    
-    // === SurfaceHolder.Callback 实现 ===
-    
-    // 防止死循环的上次重建时间
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        Log.d("CanvasTerminalView", "onSizeChanged: ${w}x${h} (old: ${oldw}x${oldh})")
-        
-        // 从无效尺寸变为有效尺寸（0x0 -> 正常）：典型场景是键盘呼出/隐藏导致的高度变化。
-        // 旧实现通过 GONE->VISIBLE 强制重建 Surface 来"治"黑屏，但序列中的 GONE 帧会让
-        // SurfaceView 透明、露出底下旧内容，紧接着新 Surface 在新位置重绘，
-        // 上下移动时即出现"快速闪现的第二次内容"。这里改为不清重建、只确保渲染线程
-        // 在跑并请求一帧重绘（drawTerminal 开头会全屏清背景，足以覆盖残留旧帧），
-        // 既不破坏 Surface、也不在 IME 动画中途触发 Surface 重建，从而消除闪现。
-        if (w > 0 && h > 0 && (oldw <= 0 || oldh <= 0)) {
-            cachedRows = 0
-            cachedCols = 0
-            Log.d("CanvasTerminalView", "onSizeChanged: Cleared terminal size cache due to 0->Normal transition")
-            if (holder.surface.isValid && (renderThread == null || !renderThread!!.isAlive)) {
-                startRenderThread()
-            }
-            synchronized(pauseLock) { isPaused = false; pauseLock.notifyAll() }
-            requestRender()
-        }
-
-        if (w <= 0 || h <= 0) {
-            Log.w("CanvasTerminalView", "onSizeChanged: Invalid size, stopping render thread")
-            stopRenderThread()
-            synchronized(pauseLock) { isPaused = true }
-        } else {
-            // 如果线程不存在（之前被销毁了），这里不急着启动，交给 surfaceChanged 统一处理
-            // 只是确保 pause 状态解除
-            synchronized(pauseLock) { 
-                isPaused = false
-                pauseLock.notifyAll()
-            }
-            
-            // 尺寸发生变化时，重新计算并同步终端大小到 PTY
-            // 这样可以确保终端窗口大小与 View 大小保持一致
-            if (oldw != w || oldh != h) {
-                Log.d("CanvasTerminalView", "onSizeChanged: Triggering updateTerminalSize(${w}x${h})")
-                updateTerminalSize(w, h)
+                break // Exit loop, wait for more data.
             }
         }
     }
-    
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        Log.d("CanvasTerminalView", "surfaceCreated")
-        // surfaceCreated 时如果尺寸未知或为0，startRenderThread 会被调用但 run 循环会等待
-        // 但为了安全，我们尽量由 surfaceChanged 驱动
-        if (width > 0 && height > 0) {
-            startRenderThread()
-        }
-    }
-    
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        Log.d("CanvasTerminalView", "surfaceChanged: ${width}x${height}")
-        
-        // 如果尺寸无效，停止渲染
-        if (width <= 0 || height <= 0) {
-            Log.d("CanvasTerminalView", "surfaceChanged: Invalid size, stopping render thread")
-            stopRenderThread()
-            synchronized(pauseLock) {
-                isPaused = true
-            }
+
+    private fun handleCarriageReturn(sessionId: String, line: String, sessionManager: SessionManager) {
+        val cleanLine = AnsiUtils.stripAnsi(line)
+        val session = sessionManager.getSession(sessionId) ?: return
+        if (session.initState != SessionInitState.READY) {
+            processLine(sessionId, line, sessionManager)
             return
         }
         
-        // 恢复状态
-        synchronized(pauseLock) {
-            isPaused = false
-            pauseLock.notifyAll()
-        }
-        
-        // 确保线程运行
-        if (renderThread == null || !renderThread!!.isAlive) {
-            Log.d("CanvasTerminalView", "surfaceChanged: Starting render thread for valid size")
-            startRenderThread()
-        }
-
-        // 更新终端窗口大小
-        updateTerminalSize(width, height)
-        
-        requestRender()
-    }
-    
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
-        Log.d("CanvasTerminalView", "surfaceDestroyed")
-        stopRenderThread()
-        // 清理方向键长按回调，避免内存泄漏
-        handleArrowKeyUp()
-    }
-    
-    // === 渲染线程 ===
-    
-    private fun startRenderThread() {
-        Log.d("CanvasTerminalView", "startRenderThread: Starting new thread")
-        stopRenderThread()
-        renderThread = RenderThread(holder).apply {
-            start()
-        }
-    }
-    
-    /**
-     * 停止渲染线程
-     * 在视图被销毁或移除时调用，避免SurfaceView锁竞争导致ANR
-     */
-    fun stopRenderThread() {
-        Log.d("CanvasTerminalView", "stopRenderThread: Stopping thread")
-        renderThread?.let { thread ->
-            Log.d("CanvasTerminalView", "stopRenderThread: Requesting stop for thread ${thread.id}")
-            thread.stopRendering()
-            thread.interrupt()
-            try {
-                thread.join(1000)
-                Log.d("CanvasTerminalView", "stopRenderThread: Thread joined")
-            } catch (e: InterruptedException) {
-                Log.e("CanvasTerminalView", "stopRenderThread: Interrupted while joining", e)
-                e.printStackTrace()
-            }
-        }
-        renderThread = null
-    }
-    
-    private inner class RenderThread(private val surfaceHolder: SurfaceHolder) : Thread("TerminalRenderThread") {
-        @Volatile
-        private var running = false
-        
-        override fun start() {
-            Log.d("CanvasTerminalView", "RenderThread: start() called")
-            running = true
-            super.start()
-        }
-        
-        fun stopRendering() {
-            Log.d("CanvasTerminalView", "RenderThread: stopRendering() called")
-            running = false
-        }
-        
-        override fun run() {
-            Log.d("CanvasTerminalView", "RenderThread started")
-            var lastRenderTime = System.currentTimeMillis()
-            val targetFrameTime = 1000L / config.targetFps
-            
-            while (running) {
-                try {
-                    // === 1. 状态检查 ===
-                    // 尺寸无效：休眠等待
-                    if (width <= 0 || height <= 0) {
-                        sleep(200)
-                        continue
-                    }
-                    
-                    // 暂停状态：等待唤醒
-                    if (isPaused) {
-                        synchronized(pauseLock) {
-                            while (isPaused && running) {
-                                pauseLock.wait()
-                            }
-                        }
-                        lastRenderTime = System.currentTimeMillis() // 重置时间基准
-                        continue
-                    }
-                    
-                    // === 2. 帧率控制 ===
-                    val currentTime = System.currentTimeMillis()
-                    val timeSinceLastRender = currentTime - lastRenderTime
-                    
-                    // 光标闪烁
-                    if (currentTime - lastCursorBlinkTime >= cursorBlinkRate) {
-                        cursorBlinkOn = !cursorBlinkOn
-                        lastCursorBlinkTime = currentTime
-                        isDirty = true
-                    }
-                    
-                    // 未到渲染时间且无脏数据：短暂休眠
-                    if (!isDirty && timeSinceLastRender < targetFrameTime) {
-                        sleep(5)
-                        continue
-                    }
-                    
-                    // === 3. 渲染 ===
-                    var canvas: Canvas? = null
-                    try {
-                        canvas = surfaceHolder.lockCanvas()
-                        if (canvas != null) {
-                            drawTerminal(canvas)
-                            isDirty = false
-                            lastRenderTime = currentTime
-                        } else {
-                            // Canvas 不可用，休眠后重试
-                            sleep(10)
-                        }
-                    } catch (e: Exception) {
-                        Log.e("CanvasTerminalView", "Render error", e)
-                    } finally {
-                        canvas?.let {
-                            try {
-                                surfaceHolder.unlockCanvasAndPost(it)
-                            } catch (e: Exception) {
-                                Log.e("CanvasTerminalView", "Failed to unlock canvas", e)
-                            }
-                        }
-                    }
-                    
-                    // === 4. 帧时间控制 ===
-                    if (canvas != null) {
-                        val frameTime = System.currentTimeMillis() - currentTime
-                        val sleepTime = targetFrameTime - frameTime
-                        if (sleepTime > 0) {
-                            sleep(sleepTime)
-                        }
-                    }
-                    
-                } catch (e: InterruptedException) {
-                    Log.d("CanvasTerminalView", "RenderThread interrupted")
-                    break
-                }
-            }
-            
-            Log.d("CanvasTerminalView", "RenderThread stopped")
-        }
-    }
-    
-    // === 核心渲染方法 ===
-    
-    private fun drawTerminal(canvas: Canvas) {
-        val em = emulator ?: return
-
-        // 限制绘制区域，防止越界绘制污染屏幕外区域
-        canvas.save()
-        canvas.clipRect(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat())
-
-        // 处理惯性滚动动画
-        if (scroller.computeScrollOffset()) {
-            val newScrollY = scroller.currY.toFloat()
-            if (newScrollY != scrollOffsetY) {
-                scrollOffsetY = newScrollY
-                
-                // 保存滚动位置
-                sessionId?.let { id ->
-                    onScrollOffsetChanged?.invoke(id, scrollOffsetY)
-                }
-                
-                // 更新用户滚动状态
-                if (scrollOffsetY > 0f) {
-                    isUserScrolling = true
-                } else {
-                    isUserScrolling = false
-                }
-                
-                // 继续请求渲染以保持动画流畅
-                isDirty = true
-            }
-        }
-        // 用同一把 bufferLock 内取齐的一致快照（内容 + historySize + 光标位置/可见性），
-        // 杜绝 IO 线程 parse 中途 scrollUp/移动光标让 history 与光标行号错位，
-        // 消除 "排版错乱 / 光标与文字不对齐 / 行序被打乱" 的渲染问题。
-        val renderState: RenderState = em.getRenderState()
-        val fullContent = renderState.fullContent
-        val historySize = renderState.historySize
-
-        val charWidth = textMetrics.charWidth
-        val charHeight = textMetrics.charHeight
-        val baseline = textMetrics.charBaseline
-
-        // 1. 首先全屏清屏（防止前帧内容残留和闪烁）
-        bgPaint.color = config.backgroundColor
-        canvas.drawRect(0f, 0f, canvas.width.toFloat(), canvas.height.toFloat(), bgPaint)
-
-        // 渲染内边距（与 updateTerminalSize 计算 cols/rows 时扣减的 padding 保持一致），
-        // 让内容绘制在 [paddingLeft, width-paddingRight] x [paddingTop, height-paddingBottom] 内，
-        // cols*charWidth 即可贴合可视宽度，消除「横向字间均匀缝隙」与「右侧内容丢失」。
-        val padLeft = config.paddingLeft
-        val padTop = config.paddingTop
-        val availHeightCanvas = (canvas.height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
-        val availWidthCanvas = (canvas.width - config.paddingLeft - config.paddingRight).coerceAtLeast(charWidth)
-
-        // 整帧用本地 offset 副本，杜绝渲染中途主线程手势回调改 scrollOffsetY 导致
-        // 前半批行用旧偏移、后半批用新偏移画出"内容显示成两个"的重影。
-        val maxScrollOffset = max(0f, fullContent.size * charHeight - availHeightCanvas)
-
-        // 仅在「没有用户手动滚动」时允许自动贴底；否则用户正在上滑查看历史时，
-        // 此处强制置底会把 scrollOffsetY 拉回最大值，与手势回调刚写入的值在每帧之间反复跳变，
-        // 表现为按住屏幕滑动时的明显抖动。
-        if (needScrollToBottom && !isUserScrolling) {
-            scrollOffsetY = maxScrollOffset
-        }
-        needScrollToBottom = false
-
-        scrollOffsetY = scrollOffsetY.coerceIn(0f, maxScrollOffset)
-        val offset = scrollOffsetY
-
-        // 计算可见区域
-        val visibleRows = (availHeightCanvas / charHeight).toInt() + 1
-        val startRow = (offset / charHeight).toInt()
-        val endRow = min(startRow + visibleRows, fullContent.size)
-
-
-        // 绘制每一行（包括背景）
-        var drawnCharCount = 0
-        for (row in startRow until endRow) {
-            if (row >= fullContent.size) break
-
-            val line = fullContent[row]
-            drawnCharCount += line.size
-
-            // 使用绝对坐标计算，避免 startRow 跳变导致的整体偏移；纵向加 paddingTop 留白
-            val exactY = row * charHeight - offset + padTop
-            val y = kotlin.math.round(exactY)
-
-            // 绘制该行的所有字符；横向起点为 paddingLeft，使 cols 与可视宽度对齐
-            drawLine(canvas, line, row, padLeft, y, charWidth, charHeight, baseline)
-        }
-        
-        // 绘制选择区域
-        if (selectionManager.hasSelection()) {
-            drawSelection(canvas, charWidth, charHeight)
-        }
-        
-        // 绘制光标（光标只在可见屏幕部分显示，需要考虑历史缓冲区偏移）
-        // 用 renderState 里的一致光标位置/可见性，避免与 historySize 错位
-        if (renderState.cursorVisible && cursorBlinkOn) {
-            val cursorRow = historySize + renderState.cursorY
-            val cursorCol = renderState.cursorX
-            
-            // 只有当光标在可见区域内时才绘制
-            if (cursorRow >= startRow && cursorRow < endRow) {
-                val exactCursorY = cursorRow * charHeight - offset + padTop
-                val cursorY = kotlin.math.round(exactCursorY)
-                
-                // 计算光标的 x 坐标，考虑宽字符；起点加 paddingLeft 与正文对齐
-                val line = fullContent.getOrNull(cursorRow) ?: arrayOf()
-                var cursorX = padLeft
-                
-                // 遍历到光标列，累加每个字符的宽度
-                for (col in 0 until cursorCol.coerceAtMost(line.size)) {
-                    val cellWidth = textMetrics.getCellWidth(line[col].char)
-                    cursorX += charWidth * cellWidth
-                }
-                
-                // 获取光标所在字符的宽度
-                val cursorCharWidth = if (cursorCol < line.size) {
-                    val cellWidth = textMetrics.getCellWidth(line[cursorCol].char)
-                    charWidth * cellWidth
-                } else {
-                    charWidth
-                }
-                
-                cursorPaint.color = Color.GREEN
-                cursorPaint.alpha = 180
-                canvas.drawRect(
-                    cursorX,
-                    cursorY,
-                    cursorX + cursorCharWidth,
-                    cursorY + charHeight,
-                    cursorPaint
-                )
-            }
-        }
-
-        // 恢复 clipRect
-        canvas.restore()
-    }
-    
-    private fun drawLine(
-        canvas: Canvas,
-        line: Array<TerminalChar>,
-        row: Int,
-        startX: Float,
-        y: Float,
-        charWidth: Float,
-        charHeight: Float,
-        baseline: Float
-    ) {
-        var x = startX
-        
-        // Pass 1: Draw Backgrounds (Batching consecutive same-color cells)
-        var currentBgColor: Int? = null
-        var bgStartX = x
-        var bgRunWidth = 0f
-        
-        for (col in line.indices) {
-            val termChar = line[col]
-            // 宽字符占位格(隐藏空格)：宽字符本身已按2格宽度绘制并推进，此格不画也不推进，
-            // 否则会让每个宽字符多占1格、相邻宽字符之间出现"一个空格"的缝隙。
-            if (termChar.isHidden && termChar.char == ' ') {
-                continue
-            }
-            val cellWidth = textMetrics.getCellWidth(termChar.char)
-            val actualCharWidth = charWidth * cellWidth
-
-            if (termChar.bgColor != config.backgroundColor) {
-                if (currentBgColor != termChar.bgColor) {
-                    // Flush previous BG
-                    currentBgColor?.let {
-                        bgPaint.color = it
-                        canvas.drawRect(bgStartX, y, bgStartX + bgRunWidth, y + charHeight, bgPaint)
-                    }
-                    // Start new BG run
-                    currentBgColor = termChar.bgColor
-                    bgStartX = startX + (if (col == 0) 0f else getXOffsetForCol(line, col, charWidth))
-                    bgRunWidth = 0f
-                }
-                bgRunWidth += actualCharWidth
-            } else {
-                // Flush previous BG
-                currentBgColor?.let {
-                    bgPaint.color = it
-                    canvas.drawRect(bgStartX, y, bgStartX + bgRunWidth, y + charHeight, bgPaint)
-                }
-                currentBgColor = null
-                bgRunWidth = 0f
-            }
-        }
-        // Flush remaining BG
-        currentBgColor?.let {
-            bgPaint.color = it
-            canvas.drawRect(bgStartX, y, bgStartX + bgRunWidth, y + charHeight, bgPaint)
-        }
-
-        // Pass 2: Draw Text (Batching consecutive compatible characters)
-        x = startX
-        val sb = StringBuilder()
-        var runStartX = x
-        
-        // Current run attributes
-        var currentFgColor = -1
-        var currentFontType = -1
-        var currentBold = false
-        var currentItalic = false
-        var currentUnderline = false
-        var currentStrike = false
-        
-        for (col in line.indices) {
-            val termChar = line[col]
-            val char = termChar.char
-            // 宽字符占位格(隐藏空格)：宽字符本身已按2格宽度绘制并推进，此格不画也不推进，
-            // 否则相邻宽字符之间会多出"一个空格"的缝隙。
-            if (termChar.isHidden && char == ' ') {
-                if (sb.isNotEmpty()) {
-                    drawTextRun(canvas, sb.toString(), runStartX, y + baseline, currentFgColor, currentFontType, currentBold, currentItalic, currentUnderline, currentStrike, charWidth)
-                    sb.setLength(0)
-                }
-                continue
-            }
-            val cellWidth = textMetrics.getCellWidth(char)
-            val actualCharWidth = charWidth * cellWidth
-            
-            if (char == ' ' || termChar.isHidden) {
-                // Space/Hidden breaks the run
-                if (sb.isNotEmpty()) {
-                    drawTextRun(canvas, sb.toString(), runStartX, y + baseline, currentFgColor, currentFontType, currentBold, currentItalic, currentUnderline, currentStrike, charWidth)
-                    sb.setLength(0)
-                }
-                x += actualCharWidth
-                continue
-            }
-
-            // Calculate attributes
-            var fgColor = termChar.fgColor
-            if (termChar.isDim) {
-                fgColor = Color.argb(180, Color.red(fgColor), Color.green(fgColor), Color.blue(fgColor))
-            }
-            if (termChar.isInverse) {
-                fgColor = termChar.bgColor
-            }
-            
-            val fontType = textMetrics.resolveFontType(char)
-            val isBold = termChar.isBold
-            val isItalic = termChar.isItalic
-            val isUnderline = termChar.isUnderline
-            val isStrike = termChar.isStrikethrough
-            
-            // Check if attributes match current run
-            val matches = sb.isNotEmpty() &&
-                    fgColor == currentFgColor &&
-                    fontType == currentFontType &&
-                    isBold == currentBold &&
-                    isItalic == currentItalic &&
-                    isUnderline == currentUnderline &&
-                    isStrike == currentStrike
-            
-            if (!matches) {
-                // Flush previous run
-                if (sb.isNotEmpty()) {
-                    drawTextRun(canvas, sb.toString(), runStartX, y + baseline, currentFgColor, currentFontType, currentBold, currentItalic, currentUnderline, currentStrike, charWidth)
-                    sb.setLength(0)
-                }
-                // Start new run
-                currentFgColor = fgColor
-                currentFontType = fontType
-                currentBold = isBold
-                currentItalic = isItalic
-                currentUnderline = isUnderline
-                currentStrike = isStrike
-                runStartX = x
-            }
-            
-            if (cellWidth == 2) {
-                // Wide char: Draw immediately to handle positioning correctly (centered in 2 cells)
-                // Or just append? If we append, we rely on Paint to advance width. 
-                // Paint.measureText might not match 2*charWidth exactly.
-                // Safer to flush and draw individually for wide chars to ensure grid alignment.
-                if (sb.isNotEmpty()) {
-                    drawTextRun(canvas, sb.toString(), runStartX, y + baseline, currentFgColor, currentFontType, currentBold, currentItalic, currentUnderline, currentStrike, charWidth)
-                    sb.setLength(0)
-                }
-                
-                // Draw wide char: 左对齐到单元格起点，由 drawTextRun 内的 textScaleX
-                // 把字形横向拉伸到 actualCharWidth（2 格），填满单元格，杜绝相邻宽字符之间
-                // 出现"一个空格宽度"的空隙。
-                drawTextRun(canvas, char.toString(), x, y + baseline, fgColor, fontType, isBold, isItalic, isUnderline, isStrike, actualCharWidth)
-                
-                // Reset run
-                runStartX = x + actualCharWidth
-            } else {
-                sb.append(char)
-            }
-            
-            x += actualCharWidth
-        }
-        
-        // Flush final run
-        if (sb.isNotEmpty()) {
-            drawTextRun(canvas, sb.toString(), runStartX, y + baseline, currentFgColor, currentFontType, currentBold, currentItalic, currentUnderline, currentStrike, charWidth)
-        }
-    }
-    
-    // Helper to calculate X offset for a column (for BG pass)
-    private fun getXOffsetForCol(line: Array<TerminalChar>, col: Int, charWidth: Float): Float {
-        var offset = 0f
-        for (i in 0 until col) {
-            // 宽字符占位格(隐藏空格)不贡献水平偏移，其位置已由前一个宽字符的2格宽度覆盖
-            if (line[i].isHidden && line[i].char == ' ') continue
-            offset += charWidth * textMetrics.getCellWidth(line[i].char)
-        }
-        return offset
-    }
-
-    private fun drawTextRun(
-        canvas: Canvas,
-        text: String,
-        x: Float,
-        y: Float,
-        color: Int,
-        fontType: Int,
-        isBold: Boolean,
-        isItalic: Boolean,
-        isUnderline: Boolean,
-        isStrike: Boolean,
-        charWidth: Float // Only used for decorations on wide chars
-    ) {
-        textMetrics.applyStyle(isBold, isItalic)
-        textMetrics.setFont(fontType)
-        textPaint.color = color
-
-        // 逐字符按固定 cell 宽对齐绘制，杜绝自然 advance 漂移导致越界
-        if (text.length <= 1) {
-            // 单字符（含宽字符）：测量字形自然 advance，按目标 cell 宽横向缩放，
-            // 让字形精确填满所属单元格。这样无论字体的 CJK advance 是否恰为
-            // 2× 拉丁宽，宽字符都能贴满 2 格，相邻宽字符之间不再出现空隙，
-            // 也使得表格分隔符（| 落在整数列）能与 CJK 文本视觉对齐。
-            val natural = textPaint.measureText(text)
-            val target = charWidth.coerceAtLeast(0f)
-            if (natural > 0f && kotlin.math.abs(natural - target) > 0.5f) {
-                textPaint.textScaleX = target / natural
-            }
-            canvas.drawText(text, x, y, textPaint)
-            textPaint.textScaleX = 1f
-        } else {
-            var cx = x
-            for (ch in text) {
-                canvas.drawText(ch.toString(), cx, y, textPaint)
-                val cw = charWidth * textMetrics.getCellWidth(ch)
-                cx += cw
-            }
-        }
-
-        val runWidth = if (text.length == 1) charWidth else text.length * textMetrics.charWidth
-
-        if (isUnderline) {
-            val underlineY = y + 2
-            canvas.drawLine(x, underlineY, x + runWidth, underlineY, textPaint)
-        }
-
-        if (isStrike) {
-            val strikeY = y - textMetrics.charHeight / 2
-            canvas.drawLine(x, strikeY, x + runWidth, strikeY, textPaint)
-        }
-
-        textMetrics.resetStyle()
-    }
-    
-    private fun drawChar(canvas: Canvas, termChar: TerminalChar, x: Float, y: Float, charWidth: Float = textMetrics.charWidth) {
-        // Legacy method, kept if needed but drawLine now uses drawTextRun
-        // We can remove it or redirect.
-    }
-    
-    private fun drawSelection(canvas: Canvas, charWidth: Float, charHeight: Float) {
-        val selection = selectionManager.selection?.normalize() ?: return
-        val em = emulator ?: return
-        val fullContent = em.getFullContentSnapshot()
-        val padLeft = config.paddingLeft
-        val padTop = config.paddingTop
-
-        for (row in selection.startRow..selection.endRow) {
-            val exactY = row * charHeight - scrollOffsetY + padTop
-            val y = kotlin.math.round(exactY)
-            
-            val startCol = if (row == selection.startRow) selection.startCol else 0
-            val endCol = if (row == selection.endRow) {
-                selection.endCol
-            } else {
-                fullContent.getOrNull(row)?.size ?: 0
-            }
-            
-            val line = fullContent.getOrNull(row) ?: continue
-            var x1 = padLeft
-            var x2 = padLeft
-            
-            for (col in 0 until startCol.coerceAtMost(line.size)) {
-                val cellWidth = textMetrics.getCellWidth(line[col].char)
-                x1 += charWidth * cellWidth
-            }
-            x2 = x1
-            for (col in startCol..endCol.coerceAtMost(line.size - 1)) {
-                val cellWidth = textMetrics.getCellWidth(line[col].char)
-                x2 += charWidth * cellWidth
-            }
-            
-            canvas.drawRect(x1, y, x2, y + charHeight, selectionPaint)
-        }
-        
-        val handleRadius = charHeight * 0.4f
-        val handleLineHeight = charHeight * 0.6f
-        
-        val startLine = fullContent.getOrNull(selection.startRow) ?: return
-        var startX = padLeft
-        for (col in 0 until selection.startCol.coerceAtMost(startLine.size)) {
-            val cellWidth = textMetrics.getCellWidth(startLine[col].char)
-            startX += charWidth * cellWidth
-        }
-        val startY = selection.startRow * charHeight - scrollOffsetY + padTop
-        canvas.drawRect(startX - handleRadius / 2, startY, startX + handleRadius / 2, startY + handleLineHeight, handlePaint)
-        canvas.drawCircle(startX, startY + handleLineHeight + handleRadius, handleRadius, handlePaint)
-        canvas.drawCircle(startX, startY + handleLineHeight + handleRadius, handleRadius, handleStrokePaint)
-        
-        val endLine = fullContent.getOrNull(selection.endRow) ?: return
-        var endX = padLeft
-        for (col in 0..selection.endCol.coerceAtMost(endLine.size - 1)) {
-            val cellWidth = textMetrics.getCellWidth(endLine[col].char)
-            endX += charWidth * cellWidth
-        }
-        val endY = selection.endRow * charHeight - scrollOffsetY + padTop + charHeight
-        canvas.drawRect(endX - handleRadius / 2, endY - handleLineHeight, endX + handleRadius / 2, endY, handlePaint)
-        canvas.drawCircle(endX, endY - handleLineHeight - handleRadius, handleRadius, handlePaint)
-        canvas.drawCircle(endX, endY - handleLineHeight - handleRadius, handleRadius, handleStrokePaint)
-    }
-    
-    private fun getHandlePositions(): Pair<Pair<Float, Float>, Pair<Float, Float>>? {
-        val selection = selectionManager.selection?.normalize() ?: return null
-        val em = emulator ?: return null
-        val fullContent = em.getFullContentSnapshot()
-        val charWidth = textMetrics.charWidth
-        val charHeight = textMetrics.charHeight
-        val handleRadius = charHeight * 0.4f
-        val handleLineHeight = charHeight * 0.6f
-        
-        val startLine = fullContent.getOrNull(selection.startRow) ?: return null
-        var startX = config.paddingLeft
-        for (col in 0 until selection.startCol.coerceAtMost(startLine.size)) {
-            val cellWidth = textMetrics.getCellWidth(startLine[col].char)
-            startX += charWidth * cellWidth
-        }
-        val startY = selection.startRow * charHeight - scrollOffsetY + config.paddingTop + handleLineHeight + handleRadius
-        
-        val endLine = fullContent.getOrNull(selection.endRow) ?: return null
-        var endX = config.paddingLeft
-        for (col in 0..selection.endCol.coerceAtMost(endLine.size - 1)) {
-            val cellWidth = textMetrics.getCellWidth(endLine[col].char)
-            endX += charWidth * cellWidth
-        }
-        val endY = selection.endRow * charHeight - scrollOffsetY + config.paddingTop + charHeight - handleLineHeight - handleRadius
-        
-        return Pair(Pair(startX, startY), Pair(endX, endY))
-    }
-    
-    private fun hitTestHandle(x: Float, y: Float): TextSelectionManager.DragHandle {
-        val positions = getHandlePositions() ?: return TextSelectionManager.DragHandle.NONE
-        val charHeight = textMetrics.charHeight
-        val hitRadius = charHeight * 1.2f
-        
-        val (startPos, endPos) = positions
-        
-        val dxStart = x - startPos.first
-        val dyStart = y - startPos.second
-        if (dxStart * dxStart + dyStart * dyStart < hitRadius * hitRadius) {
-            return TextSelectionManager.DragHandle.START
-        }
-        
-        val dxEnd = x - endPos.first
-        val dyEnd = y - endPos.second
-        if (dxEnd * dxEnd + dyEnd * dyEnd < hitRadius * hitRadius) {
-            return TextSelectionManager.DragHandle.END
-        }
-        
-        return TextSelectionManager.DragHandle.NONE
-    }
-    
-    // === 无障碍支持 ===
-    
-    /**
-     * 初始化无障碍节点信息
-     * 确保View本身不会被无障碍服务选中，只通过虚拟节点访问内容
-     */
-    override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
-        super.onInitializeAccessibilityNodeInfo(info)
-        // 关键：不设置任何描述性文本，让View对TalkBack透明
-        // 所有交互都通过虚拟节点（每一行）进行
-        info.className = CanvasTerminalView::class.java.name
-        info.isClickable = false
-        info.isFocusable = false
-        info.isLongClickable = false
-        // 不设置 contentDescription，避免整个View被朗读
-    }
-    
-    // === 触摸事件处理 ===
-    
-    /**
-     * 处理悬停事件（用于无障碍触摸探索）
-     * 当用户使用TalkBack触摸屏幕时，会触发此方法
-     */
-    override fun dispatchHoverEvent(event: MotionEvent): Boolean {
-        if (!isAccessibilityEnabled()) {
-            return super.dispatchHoverEvent(event)
-        }
-        
-        // 让accessibility delegate处理悬停事件
-        // 这样触摸探索时能找到对应的虚拟节点（行）
-        // 直接使用成员变量以兼容 API < 29 (getAccessibilityDelegate 是 API 29+)
-        terminalAccessibilityDelegate.let { delegate ->
-            val virtualViewId = delegate.findVirtualViewAt(event.x, event.y)
-            
-            when (event.action) {
-                MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
-                    // 当触摸到一个虚拟节点时，主动请求该节点获得无障碍焦点
-                    if (virtualViewId != -1) {
-                        // 获取节点提供者并请求焦点
-                        accessibilityNodeProvider?.let { provider ->
-                            provider.performAction(
-                                virtualViewId,
-                                android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS,
-                                null
-                            )
-                        }
-                        
-                        // 发送悬停事件
-                        val hoverEvent = android.view.accessibility.AccessibilityEvent.obtain(
-                            android.view.accessibility.AccessibilityEvent.TYPE_VIEW_HOVER_ENTER
-                        )
-                        hoverEvent.setSource(this, virtualViewId)
-                        try {
-                            parent?.requestSendAccessibilityEvent(this, hoverEvent)
-                        } catch (_: IllegalStateException) {
-                        }
-                    }
-                }
-                MotionEvent.ACTION_HOVER_EXIT -> {
-                    // 悬停退出时不清除焦点，让焦点保持在最后一个触摸的节点上
-                }
-            }
-        }
-        
-        return super.dispatchHoverEvent(event)
-    }
-    
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        val handled = gestureHandler.onTouchEvent(event)
-        
-        if (event.action == MotionEvent.ACTION_DOWN) {
-            if (!hasFocus()) {
-                requestFocus()
-            }
-            if (selectionManager.hasSelection()) {
-                val handle = hitTestHandle(event.x, event.y)
-                if (handle != TextSelectionManager.DragHandle.NONE) {
-                    selectionManager.activeDragHandle = handle
-                    return true
-                }
-                actionMode?.finish()
-                selectionManager.clearSelection()
-                requestRender()
-                if (!isFullscreenMode) {
-                    onRequestShowKeyboard?.invoke()
-                }
-                return handled || super.onTouchEvent(event)
-            }
-            if (!isFullscreenMode) {
-                onRequestShowKeyboard?.invoke()
-            }
-        }
-        
-        if (selectionManager.hasSelection() && event.action == MotionEvent.ACTION_MOVE) {
-            val (row, col) = screenToTerminalCoords(event.x, event.y)
-            when (selectionManager.activeDragHandle) {
-                TextSelectionManager.DragHandle.START -> {
-                    selectionManager.updateStartSelection(row, col)
-                }
-                TextSelectionManager.DragHandle.END -> {
-                    selectionManager.updateEndSelection(row, col)
-                }
-                else -> {
-                    selectionManager.updateSelection(row, col)
-                }
-            }
-            requestRender()
-        }
-        
-        if (event.action == MotionEvent.ACTION_UP) {
-            if (selectionManager.activeDragHandle != TextSelectionManager.DragHandle.NONE) {
-                selectionManager.activeDragHandle = TextSelectionManager.DragHandle.NONE
-                if (selectionManager.hasSelection()) {
-                    showTextSelectionMenu()
-                }
-            } else if (selectionManager.hasSelection()) {
-                showTextSelectionMenu()
-            }
-        }
-        
-        return handled || super.onTouchEvent(event)
-    }
-    
-    /**
-     * 屏幕坐标转换为终端坐标
-     * 考虑宽字符的影响
-     */
-    private fun screenToTerminalCoords(x: Float, y: Float): Pair<Int, Int> {
-        val em = emulator ?: return Pair(0, 0)
-        val fullContent = em.getFullContentSnapshot()
-        // 触摸坐标含内边距，还原到终端坐标空间
-        val tx = x - config.paddingLeft
-        val ty = y - config.paddingTop + scrollOffsetY
-        val row = (ty / textMetrics.charHeight).toInt().coerceIn(0, fullContent.size - 1)
-        
-        // 获取该行的内容
-        val line = fullContent.getOrNull(row) ?: return Pair(row, 0)
-        
-        // 遍历该行的字符，找到对应的列
-        var currentX = 0f
-        var col = 0
-        val charWidth = textMetrics.charWidth
-        
-        for (i in line.indices) {
-            val cellWidth = textMetrics.getCellWidth(line[i].char)
-            val actualCharWidth = charWidth * cellWidth
-            
-            if (tx < currentX + actualCharWidth / 2) {
-                // 点击位置在这个字符的前半部分
-                col = i
-                break
-            } else if (tx < currentX + actualCharWidth) {
-                // 点击位置在这个字符的后半部分（宽字符）
-                col = i
-                break
-            }
-            
-            currentX += actualCharWidth
-            col = i + 1
-        }
-        
-        return Pair(row, col.coerceIn(0, line.size - 1))
-    }
-    
-    /**
-     * 开始文本选择
-     */
-    private fun startTextSelection(x: Float, y: Float) {
-        val (row, col) = screenToTerminalCoords(x, y)
-        val em = emulator ?: return
-        val content = em.getFullContentSnapshot()
-        val line = content.getOrNull(row) ?: return
-        
-        val isWordChar: (Char) -> Boolean = { c -> c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/' }
-        
-        var startCol = col
-        while (startCol > 0 && line.getOrNull(startCol - 1)?.char?.let(isWordChar) == true) {
-            startCol--
-        }
-        
-        var endCol = col
-        while (endCol < line.size - 1 && line.getOrNull(endCol + 1)?.char?.let(isWordChar) == true) {
-            endCol++
-        }
-        
-        if (startCol == endCol) {
-            startCol = (col - 1).coerceAtLeast(0)
-            endCol = (col + 1).coerceAtMost(line.size - 1)
-        }
-        
-        selectionManager.setSelection(row, startCol, row, endCol)
-        requestRender()
-    }
-    
-    private fun selectWordAt(x: Float, y: Float) {
-        val (row, col) = screenToTerminalCoords(x, y)
-        val em = emulator ?: return
-        val content = em.getFullContentSnapshot()
-        val line = content.getOrNull(row) ?: return
-        
-        val isWordChar: (Char) -> Boolean = { c -> c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/' }
-        
-        var startCol = col
-        while (startCol > 0 && line.getOrNull(startCol - 1)?.char?.let(isWordChar) == true) {
-            startCol--
-        }
-        
-        var endCol = col
-        while (endCol < line.size - 1 && line.getOrNull(endCol + 1)?.char?.let(isWordChar) == true) {
-            endCol++
-        }
-        
-        if (startCol == endCol && line.getOrNull(startCol)?.char?.let(isWordChar) != true) {
+        // 检查是否是命令提示符（优先级最高）
+        // 即使是 CR line，如果是提示符也应该作为命令完成处理
+        if (isPrompt(cleanLine.trim())) {
+            Log.d(TAG, "Detected prompt in CR line: '$cleanLine'")
+            handlePrompt(sessionId, cleanLine, sessionManager)
+            sessionStates[sessionId]?.justHandledCarriageReturn = false
             return
         }
         
-        selectionManager.startSelection(row, startCol)
-        selectionManager.updateSelection(row, endCol)
-        actionMode?.finish()
-        actionMode = null
-        showTextSelectionMenu()
-        requestRender()
+        // 只有在清理后的内容非空时才处理为进度更新
+        // 空内容（如 ANSI 控制序列）不应影响下一行的处理
+        if (cleanLine.isNotEmpty()) {
+            updateProgressOutput(sessionId, cleanLine, sessionManager)
+            sessionStates[sessionId]?.justHandledCarriageReturn = true
+        }
+        // 如果是空内容（纯 ANSI 控制序列），不设置 justHandledCarriageReturn
+        // 这样下一行会被正常处理，而不是被当作进度更新
     }
-    
-    /**
-     * 显示文本选择菜单
-     */
-    private fun showTextSelectionMenu() {
-        if (actionMode != null) return
-        
-        actionMode = startActionMode(object : ActionMode.Callback {
-            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                menu.add(0, 1, 0, android.R.string.selectAll)
-                menu.add(0, 2, 0, android.R.string.copy)
-                menu.add(0, 3, 0, "Paste")
-                return true
+
+    private fun processLine(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+
+        when (session.initState) {
+            SessionInitState.INITIALIZING -> {
+                handleInitializingState(sessionId, line, sessionManager)
             }
-            
-            override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
-                return false
+            SessionInitState.LOGGED_IN -> {
+                handleLoggedInState(sessionId, line, sessionManager)
             }
-            
-            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-                when (item.itemId) {
-                    1 -> {
-                        selectAllText()
-                        return true
+            SessionInitState.AWAITING_FIRST_PROMPT -> {
+                handleAwaitingFirstPromptState(sessionId, line, sessionManager)
+            }
+            SessionInitState.READY -> {
+                val state = sessionStates.getOrPut(sessionId) { SessionProcessingState() }
+                if (state.justHandledCarriageReturn) {
+                    // A newline is received after a carriage return. This finalizes the line that was being updated.
+                    state.justHandledCarriageReturn = false // Reset state immediately
+
+                    val cleanLine = AnsiUtils.stripAnsi(line)
+
+                    if (cleanLine.isNotEmpty()) {
+                        updateProgressOutput(sessionId, cleanLine, sessionManager)
                     }
-                    2 -> {
-                        copySelectedText()
-                        mode.finish()
-                        return true
+
+                    // Always append a newline to finalize the line and move to the next.
+                    val currentItem = session.currentExecutingCommand
+                    if (currentItem != null) {
+                        session.currentCommandOutput.append('\n')
+                        currentItem.setOutput(session.currentCommandOutput.toString())
                     }
-                    3 -> {
-                        pasteFromClipboard()
-                        mode.finish()
-                        return true
-                    }
-                }
-                return false
-            }
-            
-            override fun onDestroyActionMode(mode: ActionMode) {
-                actionMode = null
-                selectionManager.clearSelection()
-                requestRender()
-            }
-        }, ActionMode.TYPE_FLOATING)
-    }
-    
-    /**
-     * 复制选中的文本
-     */
-    private fun copySelectedText() {
-        val selection = selectionManager.selection?.normalize() ?: return
-        val content = emulator?.getFullContentSnapshot() ?: return
-        
-        val text = buildString {
-            for (row in selection.startRow..selection.endRow) {
-                if (row >= content.size) break
-                
-                val line = content[row]
-                val startCol = if (row == selection.startRow) selection.startCol else 0
-                val endCol = if (row == selection.endRow) {
-                    selection.endCol
                 } else {
-                    line.size
-                }
-                
-                for (col in startCol..endCol.coerceAtMost(line.size - 1)) {
-                    append(line[col].char)
-                }
-                
-                if (row < selection.endRow) {
-                    append('\n')
+                    handleReadyState(sessionId, line, sessionManager)
                 }
             }
         }
-        
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Terminal", text))
     }
-    
-    private fun selectAllText() {
-        val content = emulator?.getFullContentSnapshot() ?: return
-        if (content.isEmpty()) return
-        val lastRow = content.size - 1
-        val lastCol = (content[lastRow].size - 1).coerceAtLeast(0)
-        selectionManager.startSelection(0, 0)
-        selectionManager.updateSelection(lastRow, lastCol)
-        requestRender()
-    }
-    
-    private fun pasteFromClipboard() {
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = clipboard.primaryClip ?: return
-        if (clip.itemCount > 0) {
-            val text = clip.getItemAt(0).text?.toString() ?: return
-            inputCallback?.invoke(text)
-        }
-    }
-    
-    // === 输入法支持 ===
-    
-    /**
-     * 显示软键盘
-     */
-    private fun showSoftKeyboard() {
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-    }
-    
-    /**
-     * 隐藏软键盘
-     */
-    fun hideSoftKeyboard() {
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.hideSoftInputFromWindow(windowToken, 0)
-    }
-    
-    /**
-     * 创建输入连接
-     */
-    override fun onCreateInputConnection(outAttrs: EditorInfo?): InputConnection {
-        outAttrs?.apply {
-            inputType = EditorInfo.TYPE_CLASS_TEXT
-            imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_ACTION_NONE
-        }
-        
-        return object : BaseInputConnection(this, true) {
-            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                text?.let {
-                    inputCallback?.invoke(it.toString())
+
+    private fun handleInitializingState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        if (line.contains("LOGIN_SUCCESSFUL")) {
+            Log.d(TAG, "Login successful marker found.")
+            sessionManager.getSession(sessionId)?.let { session ->
+                session.currentCommandOutput.clear()
+                sessionManager.updateSession(sessionId) {
+                    it.copy(initState = SessionInitState.LOGGED_IN)
                 }
-                return true
+            }
+        }
+    }
+
+    private fun handleLoggedInState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        if (AnsiUtils.stripAnsi(line).contains("TERMINAL_READY")) {
+            Log.d(TAG, "TERMINAL_READY marker found.")
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(initState = SessionInitState.AWAITING_FIRST_PROMPT)
+            }
+        }
+    }
+
+    private fun handleAwaitingFirstPromptState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        val cleanLine = AnsiUtils.stripAnsi(line)
+        Log.d(TAG, "handleAwaitingFirstPromptState: checking line: '$cleanLine'")
+        if (handlePrompt(sessionId, cleanLine, sessionManager)) {
+            Log.d(TAG, "First prompt detected. Session is now ready.")
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(initState = SessionInitState.READY)
             }
             
-            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                if (beforeLength > 0) {
-                    // 发送退格键
-                    inputCallback?.invoke("\u007F") // DEL character
-                }
-                return true
-            }
+            // 将首个提示符写入 ANSI 解析器，确保画布立即显示
+            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
             
-            override fun sendKeyEvent(event: KeyEvent?): Boolean {
-                event?.let {
-                    when (it.action) {
-                        KeyEvent.ACTION_DOWN -> {
-                            // Ctrl + A..Z → 控制字符 (Ctrl+P → \u0010, Ctrl+C → \u0003, etc.)
-                            if (it.isCtrlPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
-                                val ctrlChar = (it.keyCode - KeyEvent.KEYCODE_A + 1).toChar()
-                                inputCallback?.invoke(ctrlChar.toString())
-                                return true
-                            }
-                            // Alt + 字母 → ESC 前缀序列
-                            if (it.isAltPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
-                                val ch = (it.keyCode - KeyEvent.KEYCODE_A + 'a'.code).toChar()
-                                inputCallback?.invoke("\u001b$ch")
-                                return true
-                            }
-                            when (it.keyCode) {
-                                KeyEvent.KEYCODE_DEL -> {
-                                    inputCallback?.invoke("\u007F")
-                                    return true
-                                }
-                                KeyEvent.KEYCODE_ENTER -> {
-                                    inputCallback?.invoke("\r")
-                                    return true
-                                }
-                                KeyEvent.KEYCODE_DPAD_UP,
-                                KeyEvent.KEYCODE_DPAD_DOWN,
-                                KeyEvent.KEYCODE_DPAD_LEFT,
-                                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                                    // 全屏模式下处理方向键长按
-                                    if (isFullscreenMode) {
-                                        handleArrowKeyDown(it.keyCode)
-                                        return true
-                                    }
-                                }
-                            }
-                        }
-                        KeyEvent.ACTION_UP -> {
-                            when (it.keyCode) {
-                                KeyEvent.KEYCODE_DPAD_UP,
-                                KeyEvent.KEYCODE_DPAD_DOWN,
-                                KeyEvent.KEYCODE_DPAD_LEFT,
-                                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                                    // 全屏模式下处理方向键释放
-                                    if (isFullscreenMode) {
-                                        handleArrowKeyUp()
-                                        return true
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                return super.sendKeyEvent(event)
-            }
+            // 发送欢迎语到 Canvas
+            sendWelcomeMessage(sessionId, sessionManager)
+            
+            // 重新发送当前 prompt 行（清屏操作会清除 prompt）
+            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
+        } else {
+            Log.d(TAG, "Not a prompt, continuing to wait...")
         }
     }
-    
-    /**
-     * 处理方向键按下
-     */
-    private fun handleArrowKeyDown(keyCode: Int) {
-        // 如果已经有其他方向键被按下，先释放
-        if (isArrowKeyPressed && currentArrowKey != keyCode) {
-            handleArrowKeyUp()
+
+    private fun handleReadyState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        val cleanLine = AnsiUtils.stripAnsi(line)
+        Log.d(TAG, "Stripped line: '$cleanLine'")
+
+        // 跳过TERMINAL_READY信号
+        if (cleanLine.trim() == "TERMINAL_READY") {
+            return
         }
-        
-        currentArrowKey = keyCode
-        isArrowKeyPressed = true
-        
-        // 立即发送一次方向键
-        sendArrowKey(keyCode)
-        
-        // 延迟后开始重复发送
-        arrowKeyRepeatRunnable = object : Runnable {
-            override fun run() {
-                if (isArrowKeyPressed && currentArrowKey == keyCode) {
-                    sendArrowKey(keyCode)
-                    handler.postDelayed(this, repeatInterval)
-                }
-            }
+
+        val session = sessionManager.getSession(sessionId) ?: return
+
+        // 检测命令回显
+        if (isCommandEcho(cleanLine, session)) {
+            Log.d(TAG, "Ignoring command echo: '$cleanLine'")
+            return
         }
-        handler.postDelayed(arrowKeyRepeatRunnable!!, longPressDelay)
-    }
-    
-    /**
-     * 处理方向键释放
-     */
-    private fun handleArrowKeyUp() {
-        isArrowKeyPressed = false
-        currentArrowKey = null
-        arrowKeyRepeatRunnable?.let {
-            handler.removeCallbacks(it)
-            arrowKeyRepeatRunnable = null
+
+        // 优先处理常规提示符，因为它表示命令结束
+        if (handlePrompt(sessionId, cleanLine, sessionManager)) {
+            return
         }
-    }
-    
-    /**
-     * 发送方向键的 ANSI 转义序列
-     */
-    private fun sendArrowKey(keyCode: Int) {
-        val escapeSequence = when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> "\u001b[A"    // ESC [ A
-            KeyEvent.KEYCODE_DPAD_DOWN -> "\u001b[B"  // ESC [ B
-            KeyEvent.KEYCODE_DPAD_RIGHT -> "\u001b[C" // ESC [ C
-            KeyEvent.KEYCODE_DPAD_LEFT -> "\u001b[D"   // ESC [ D
-            else -> return
-        }
-        inputCallback?.invoke(escapeSequence)
-    }
-    
-    /**
-     * 检查是否可以显示输入法
-     */
-    override fun onCheckIsTextEditor(): Boolean {
-        return isFullscreenMode
+
+        // 注意：不在这里检测交互式提示符，因为这里处理的是以 CRLF 结束的完整行
+        // 真正的交互式提示符通常不以换行结束，会在 buffer 末尾被检测到（第 118 行）
+
+        // 处理普通输出
+        updateCommandOutput(sessionId, cleanLine, sessionManager)
     }
 
     /**
-     * 硬件键盘事件处理：捕获 Ctrl+字母 等控制组合键，
-     * 直接发给 PTY，避免默认 InputConnection 路径丢弃这些事件。
+     * 检测是否是提示符
      */
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        event?.let {
-            if (it.action == KeyEvent.ACTION_DOWN) {
-                // Ctrl + A..Z → 控制字符 (Ctrl+P → \u0010, Ctrl+C → \u0003, etc.)
-                if (it.isCtrlPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
-                    val ctrlChar = (it.keyCode - KeyEvent.KEYCODE_A + 1).toChar()
-                    inputCallback?.invoke(ctrlChar.toString())
-                    return true
-                }
-                // Alt + 字母 → ESC 前缀序列
-                if (it.isAltPressed && it.keyCode in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z) {
-                    val ch = (it.keyCode - KeyEvent.KEYCODE_A + 'a'.code).toChar()
-                    inputCallback?.invoke("\u001b$ch")
-                    return true
-                }
-                // Enter / DEL 直送
-                if (it.keyCode == KeyEvent.KEYCODE_ENTER) {
-                    inputCallback?.invoke("\r")
-                    return true
-                }
-                if (it.keyCode == KeyEvent.KEYCODE_DEL) {
-                    inputCallback?.invoke("\u007F")
-                    return true
-                }
-                // 方向键
-                if (it.keyCode in intArrayOf(
-                        KeyEvent.KEYCODE_DPAD_UP,
-                        KeyEvent.KEYCODE_DPAD_DOWN,
-                        KeyEvent.KEYCODE_DPAD_LEFT,
-                        KeyEvent.KEYCODE_DPAD_RIGHT
-                    )) {
-                    if (isFullscreenMode) {
-                        handleArrowKeyDown(it.keyCode)
-                        return true
-                    }
-                }
-            }
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode in intArrayOf(
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT
-            ) && isFullscreenMode) {
-            handleArrowKeyUp()
+    fun isPrompt(line: String): Boolean {
+        val cwdPromptRegex = Regex("<cwd>(.*)</cwd>.*[#$]")
+        if (cwdPromptRegex.containsMatchIn(line)) {
             return true
         }
-        return super.onKeyUp(keyCode, event)
+
+        val trimmed = line.trim()
+        return trimmed.endsWith("$") ||
+                trimmed.endsWith("#") ||
+                trimmed.endsWith("$ ") ||
+                trimmed.endsWith("# ") ||
+                Regex(".*@[a-zA-Z0-9.\\-]+\\s?:\\s?~?/?.*[#$]\\s*$").matches(trimmed) ||
+                Regex("root@[a-zA-Z0-9.\\-]+:\\s?~?/?.*#\\s*$").matches(trimmed)
     }
-    
+
     /**
-     * 更新终端窗口大小
+     * 处理提示符
      */
-    private fun updateTerminalSize(width: Int, height: Int, immediate: Boolean = false) {
-        if (width <= 0 || height <= 0) return
+    private fun handlePrompt(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ): Boolean {
+        val session = sessionManager.getSession(sessionId) ?: return false
 
-        // 1. 记录当前的滚动状态（基于行数，而不是像素）
-        // 这样在缩放后可以恢复到相同的逻辑位置
-        val oldCharHeight = textMetrics.charHeight
-        val currentScrollRows = if (oldCharHeight > 0) scrollOffsetY / oldCharHeight else 0f
-        
-        // 确保字体指标已更新（基于当前缩放因子）
-        textMetrics.updateFromRenderConfig(config.copy(fontSize = config.fontSize * scaleFactor))
+        val cwdPromptRegex = Regex("<cwd>(.*)</cwd>.*[#$]")
+        val match = cwdPromptRegex.find(line)
 
-        // 计算终端尺寸（行和列）
-        // 用 roundToInt（而非 toInt=floor）让 cols*charWidth 尽量贴满可视宽度，
-        // 并扣除 RenderConfig 的左右/上下 padding，使 cols 与实际可绘制宽度严格一致：
-        // opencode 按此 cols 排版的内容必然能完整显示在 [paddingLeft, width-paddingRight] 内，
-        // 不再出现"右边内容丢失、必须缩到很小才能看完一行"的现象。
-        val availWidth = (width - config.paddingLeft - config.paddingRight).coerceAtLeast(textMetrics.charWidth)
-        val availHeight = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(textMetrics.charHeight)
-        val cols = (availWidth / textMetrics.charWidth).roundToInt().coerceAtLeast(1)
-        val rows = (availHeight / textMetrics.charHeight).roundToInt().coerceAtLeast(1)
-        
-        // 只有当尺寸真正发生变化时才更新
-        if (rows == cachedRows && cols == cachedCols) {
-            return
-        }
-        
-        cachedRows = rows
-        cachedCols = cols
-
-        // 真正的 resize(emulator) + SIGWINCH(pty) 去抖到尺寸稳定后再执行一次。
-        // adjustResize 下键盘动画高度逐帧变化，若每帧 resize+SIGWINCH，
-        // opencode 会收到一连串 SIGWINCH、用过期列数反复重排，
-        // 旧布局与新布局交替浮现为"内容出现两次"。去抖后只有最终尺寸生效。
-        pendingCols = cols
-        pendingRows = rows
-        pendingWidth = width
-        pendingHeight = height
-        pendingScrollRows = currentScrollRows
-        mainHandler.removeCallbacks(resizeCommitRunnable)
-        // 缩放结束/字体变更等离散事件立即同步 resize+SIGWINCH，让 opencode 及时按新
-        // 列数重排；仅在键盘起落的连续帧场景走去抖，避免逐帧重排产生重影。
-        if (immediate) {
-            commitPendingResize()
-        } else {
-            mainHandler.postDelayed(resizeCommitRunnable, resizeDebounceMs)
-        }
-    }
-
-    private fun commitPendingResize() {
-        val cols = pendingCols
-        val rows = pendingRows
-        if (cols <= 0 || rows <= 0) return
-        val width = pendingWidth
-        val height = pendingHeight
-        val currentScrollRows = pendingScrollRows
-
-        // 更新模拟器尺寸
-        emulator?.resize(cols, rows)
-
-        // 恢复滚动位置（与 drawTerminal 一致，用扣过 padding 的可用高度）
-        // 仅在用户未手动滚动时按比例恢复；否则 resize 重算的 offset 会与手势回调
-        // 刚写入的 scrollOffsetY 在每帧之间互相覆盖，造成按住屏幕滑动时的明显抖动。
-        if (emulator != null && !isUserScrolling) {
-            val newCharHeight = textMetrics.charHeight
-            val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(newCharHeight)
-            val fullContentSize = (emulator?.getHistorySize() ?: 0) + (emulator?.getScreenHeight() ?: 0)
-            val maxScrollOffset = max(0f, fullContentSize * newCharHeight - availH)
-            scrollOffsetY = (currentScrollRows * newCharHeight).coerceIn(0f, maxScrollOffset)
-        }
-
-        // 同步 PTY 窗口尺寸（后台线程，避免 ANR）
-        val targetPty = pty
-        Thread {
-            try {
-                targetPty?.setWindowSize(rows, cols)
-            } catch (e: Exception) {
-                Log.e("CanvasTerminalView", "Failed to update PTY window size", e)
+        val isAPrompt = if (match != null) {
+            val path = match.groups[1]?.value?.trim() ?: "~"
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(currentDirectory = "$path $")
             }
-        }.start()
+            
+            // 发出目录变化事件
+            onDirectoryChangeEvent(SessionDirectoryEvent(
+                sessionId = sessionId,
+                currentDirectory = "$path $"
+            ))
+            
+            Log.d(TAG, "Matched CWD prompt. Path: $path")
 
-        requestRender()
+            val outputBeforePrompt = line.substring(0, match.range.first)
+            if (outputBeforePrompt.isNotBlank()) {
+                session.currentCommandOutput.append(outputBeforePrompt)
+            }
+            true
+        } else {
+            val trimmed = line.trim()
+            val isFallbackPrompt = trimmed.endsWith("$") ||
+                    trimmed.endsWith("#") ||
+                    trimmed.endsWith("$ ") ||
+                    trimmed.endsWith("# ") ||
+                    Regex(".*@[a-zA-Z0-9.\\-]+\\s?:\\s?~?/?.*[#$]\\s*$").matches(trimmed) ||
+                    Regex("root@[a-zA-Z0-9.\\-]+:\\s?~?/?.*#\\s*$").matches(trimmed)
+
+            if (isFallbackPrompt) {
+                val regex = Regex(""".*:\s*(~?/?.*)\s*[#$]$""")
+                val matchResult = regex.find(trimmed)
+                val cleanPrompt = matchResult?.groups?.get(1)?.value?.trim() ?: trimmed
+                sessionManager.updateSession(sessionId) { session ->
+                    session.copy(currentDirectory = "${cleanPrompt} $")
+                }
+                
+                // 发出目录变化事件
+                onDirectoryChangeEvent(SessionDirectoryEvent(
+                    sessionId = sessionId,
+                    currentDirectory = "${cleanPrompt} $"
+                ))
+                
+                Log.d(TAG, "Matched fallback prompt: $cleanPrompt")
+                true
+            } else {
+                false
+            }
+        }
+
+        if (isAPrompt) {
+            // 检测到常规提示符，表示我们回到了shell。
+            // 确保退出任何持久的交互模式。
+            if (session.isInteractiveMode) {
+                sessionManager.updateSession(sessionId) {
+                    it.copy(
+                        isInteractiveMode = false,
+                        interactivePrompt = ""
+                    )
+                }
+            }
+            finishCurrentCommand(sessionId, sessionManager)
+            return true
+        }
+        return false
     }
-}
 
+    /**
+     * 使用 PTY 模式检测是否正在等待交互式输入
+     * 完全依赖 PTY 层面的状态，不使用任何文本模式匹配
+     */
+    fun isInteractivePrompt(line: String, sessionId: String, sessionManager: SessionManager): Boolean {
+        val session = sessionManager.getSession(sessionId) ?: return false
+        val pty = session.pty ?: return false
+        
+        // 只在有命令执行时才检测（避免误判普通 shell 提示符）
+        if (session.currentExecutingCommand?.isExecuting != true) {
+            return false
+        }
+        
+        try {
+            val ptyMode = pty.getPtyMode()
+            val isWaiting = ptyMode.isWaitingForInput()
+            
+            if (!isWaiting) {
+                return false
+            }
+            
+            // 无论 canonical 还是 non-canonical mode，都完全依赖 PTY 状态判断
+            // 不使用任何文本模式匹配或关键词判断
+            val mode = if (ptyMode.isCanonicalMode) "canonical" else "non-canonical"
+            Log.d(TAG, "Detected interactive prompt ($mode mode, available=${ptyMode.availableBytes}): $line")
+            
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking PTY mode", e)
+            return false
+        }
+    }
+
+
+
+    private fun handleInteractivePrompt(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
+    ) {
+        Log.d(TAG, "Detected interactive prompt: $cleanLine")
+        val session = sessionManager.getSession(sessionId) ?: return
+        
+        sessionManager.updateSession(sessionId) { session ->
+            session.copy(
+                isWaitingForInteractiveInput = true,
+                lastInteractivePrompt = cleanLine,
+                isInteractiveMode = true, // 统一标记为交互模式
+                interactivePrompt = cleanLine
+            )
+        }
+
+        // 将交互式提示添加到当前命令的输出中
+        if (cleanLine.isNotBlank()) {
+            updateCommandOutput(sessionId, cleanLine, sessionManager)
+        }
+    }
+
+
+
+    private fun isCommandEcho(cleanLine: String, session: TerminalSessionData): Boolean {
+        val lastExecutingItem = session.currentExecutingCommand
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+            val commandToCheck = lastExecutingItem.command.trim()
+            val lineToCheck = cleanLine.trim()
+            val isMatch = lineToCheck == commandToCheck
+
+            if (session.currentCommandOutput.isEmpty() && isMatch) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun updateCommandOutput(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        val currentItem = session.currentExecutingCommand
+
+        if (currentItem != null && currentItem.isExecuting) {
+            val builder = session.currentCommandOutput
+            // 确保输出之间有换行符
+            if (builder.isNotEmpty() && builder.last() != '\n') {
+                builder.append('\n')
+            }
+            builder.append(cleanLine)
+
+            // 实时更新当前输出块
+            currentItem.setOutput(builder.toString())
+            session.currentOutputLineCount++
+            
+            // 发出命令执行过程事件
+            onCommandExecutionEvent(CommandExecutionEvent(
+                commandId = currentItem.id,
+                sessionId = sessionId,
+                outputChunk = cleanLine,
+                isCompleted = false
+            ))
+
+            if (session.currentOutputLineCount >= MAX_LINES_PER_HISTORY_ITEM) {
+                // 当前页已满，将其添加到已完成的页面列表并开始新的一页
+                currentItem.outputPages.add(currentItem.output)
+                builder.clear()
+                session.currentOutputLineCount = 0
+                currentItem.setOutput("") // 为新页面清空实时输出
+            }
+        }
+    }
+
+    private fun updateProgressOutput(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        val builder = session.currentCommandOutput
+        val lastExecutingItem = session.currentExecutingCommand
+
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+             // More efficient way to replace the last line
+            val lastNewlineIndex = builder.lastIndexOf('\n')
+            if (lastNewlineIndex != -1) {
+                // Found a newline, replace everything after it
+                builder.setLength(lastNewlineIndex + 1)
+                builder.append(cleanLine)
+            } else {
+                // No newline, replace the whole buffer
+                builder.clear()
+                builder.append(cleanLine)
+            }
+            // Update history from the builder
+            lastExecutingItem.setOutput(builder.toString().trimEnd())
+        }
+    }
+
+    private fun finishCurrentCommand(sessionId: String, sessionManager: SessionManager) {
+        sessionManager.updateSession(sessionId) { session ->
+            session.copy(
+                isWaitingForInteractiveInput = false,
+                lastInteractivePrompt = "",
+                isInteractiveMode = false,
+                interactivePrompt = ""
+            )
+        }
+
+        val session = sessionManager.getSession(sessionId) ?: return
+        val lastExecutingItem = session.currentExecutingCommand
+
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+            lastExecutingItem.setOutput(session.currentCommandOutput.toString().trim())
+            lastExecutingItem.setExecuting(false)
+
+            Log.i(TAG, "Finishing command ${lastExecutingItem.id} for session $sessionId")
+            
+            // 发出命令完成事件
+            onCommandExecutionEvent(CommandExecutionEvent(
+                commandId = lastExecutingItem.id,
+                sessionId = sessionId,
+                outputChunk = "",
+                isCompleted = true
+            ))
+
+            // Clear the reference since command is no longer executing
+            session.currentExecutingCommand = null
+            session.currentCommandOutput.clear()
+            
+            // 通知命令已完成，可以处理下一个队列命令
+            onCommandCompleted(sessionId)
+        }
+    }
+
+    /**
+     * 检测并处理全屏模式切换
+     * @return 如果处理了全屏模式切换，则返回 true
+     */
+    private fun detectFullscreenMode(sessionId: String, buffer: StringBuilder, sessionManager: SessionManager): Boolean {
+        // CSI ? 1049 h: 启用备用屏幕缓冲区（进入全屏模式）
+        // CSI ? 1049 l: 禁用备用屏幕缓冲区（退出全屏模式）
+        val enterFullscreen = "\u001B[?1049h"
+        val exitFullscreen = "\u001B[?1049l"
+
+        val bufferContent = buffer.toString()
+
+        val enterIndex = bufferContent.indexOf(enterFullscreen)
+        val exitIndex = bufferContent.indexOf(exitFullscreen)
+
+        if (enterIndex != -1) {
+            Log.d(TAG, "Entering fullscreen mode for session $sessionId")
+            
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(isFullscreen = true)
+            }
+            
+            // 清空缓冲区，ansiParser 已经包含所有内容
+            buffer.clear()
+            return true
+        }
+
+        if (exitIndex != -1) {
+            Log.d(TAG, "Exiting fullscreen mode for session $sessionId")
+            val outputBeforeExit = bufferContent.substring(0, exitIndex)
+
+            // 更新最后一个命令的输出
+            if (outputBeforeExit.isNotEmpty()) {
+                updateCommandOutput(sessionId, outputBeforeExit, sessionManager)
+            }
+
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(isFullscreen = false)
+            }
+
+            // 消耗包括退出代码在内的所有内容
+            buffer.delete(0, exitIndex + exitFullscreen.length)
+
+            // 退出全屏后，我们可能需要重新绘制提示符
+            finishCurrentCommand(sessionId, sessionManager)
+            return true
+        }
+        return false
+    }
+
+    /**
+     * 发送欢迎消息到 Canvas
+     * 在 READY 状态时清屏，然后显示欢迎消息
+     */
+    private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        
+        // 5 行 x 4 列逐字像素艺术字模，重组为 "onecode"；
+        // one(浅灰 250) + code(橙 208)。使用 U+2588 (█) 画左右竖线与右长竖；
+        // 使用 U+2580 (▀)、U+2584 (▄) 半角方块画横线（高度仅 0.5 cell），
+        // 物理上实现横竖线条粗细 1:1 完全一致，消除"横粗竖细"与"字被拉长"两个痛点。
+        // 总宽 34 列（4×7 + 6），左右两侧自动留出 3-5 列呼吸空白。
+        val glyphs = mapOf(
+            'o' to listOf(
+                " ▀▀ ",
+                "█  █",
+                "█  █",
+                " ▄▄ ",
+                "    "
+            ),
+            'n' to listOf(
+                " ▀▀ ",
+                "█  █",
+                "█  █",
+                "█  █",
+                "    "
+            ),
+            'e' to listOf(
+                " ▀▀ ",
+                "█▀▀█",
+                "█   ",
+                " ▄▄ ",
+                "    "
+            ),
+            'c' to listOf(
+                " ▀▀ ",
+                "█   ",
+                "█   ",
+                " ▄▄ ",
+                "    "
+            ),
+            'd' to listOf(
+                "   █",
+                " ▀▀█",
+                "█  █",
+                " ▄▄█",
+                "    "
+            )
+        )
+        val text = "onecode"
+        val sep = " "
+        val height = 5
+        val ansiRegex = Regex("\u001B\\[[0-9;]*m")
+        // 逐行拼装：每个字符 glyph 套上对应颜色（one 0..2 灰、code 3..6 橙），以单 cell 间隔分隔
+        val artLines = List(height) { row ->
+            val sb = StringBuilder()
+            text.forEachIndexed { i, ch ->
+                if (i > 0) sb.append(sep)
+                val glyph = glyphs[ch]?.get(row) ?: "     "
+                val color = if (i < 3) "\u001B[38;5;250m" else "\u001B[38;5;208m"
+                sb.append(color).append(glyph).append("\u001B[0m")
+            }
+            sb.toString()
+        }
+        // art 实际可见宽度（去除 ANSI 序列后，最长一行字符数）
+        val artWidth = artLines.maxOf { it.replace(ansiRegex, "").length }
+        val screenWidth = session.ansiParser.getScreenWidth()
+        val prefix = if (screenWidth > artWidth) (screenWidth - artWidth) / 2 else 0
+        val pad = " ".repeat(prefix)
+        
+        val sb = StringBuilder("\u001B[2J\u001B[H")
+        for (line in artLines) {
+            sb.append(pad).append(line).append("\r\n")
+        }
+        sb.append("\r\n")
+        sb.append("  >> Your portable Ubuntu environment on Android <<\r\n")
+        
+        // 直接发送到 ANSI 解析器（Canvas 渲染）
+        // 清屏操作会清除之前初始化过程中的所有输出
+        session.ansiParser.parse(sb.toString())
+        
+        Log.d(TAG, "Welcome message sent (sw=$screenWidth, artWidth=$artWidth, prefix=$prefix) for session $sessionId")
+    }
+
+}
