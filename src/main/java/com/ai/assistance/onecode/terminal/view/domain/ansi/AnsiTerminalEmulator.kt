@@ -5,6 +5,19 @@ import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
+ * 整帧渲染所需的一致快照：内容 + 光标位置/可见性，在同一把 [AnsiTerminalEmulator.bufferLock]
+ * 内一次性取齐，保证渲染线程整帧绘制期间不会读到 IO 线程 parse 写到一半的中间态
+ * （光标行号与 history 错位 → "排版错乱"）。
+ */
+data class RenderState(
+    val fullContent: List<Array<TerminalChar>>,
+    val historySize: Int,
+    val cursorX: Int,
+    val cursorY: Int,
+    val cursorVisible: Boolean
+)
+
+/**
  * 终端字符数据
  */
 data class TerminalChar(
@@ -740,13 +753,14 @@ class AnsiTerminalEmulator(
         return builder.toString()
     }
     
-    fun getCursorX(): Int = cursorX
-    fun getCursorY(): Int = cursorY
-    fun isCursorVisible(): Boolean = cursorVisible
-    fun getScreenWidth(): Int = screenWidth
-    fun getScreenHeight(): Int = screenHeight
-    
-    fun getScreenContent(): Array<Array<TerminalChar>> = screenBuffer
+    // 单点查询均加锁，避免与 IO 线程 parse 中的 scrollUp/cursorX/Y 修改并发读取到中间态。
+    fun getCursorX(): Int = synchronized(bufferLock) { cursorX }
+    fun getCursorY(): Int = synchronized(bufferLock) { cursorY }
+    fun isCursorVisible(): Boolean = synchronized(bufferLock) { cursorVisible }
+    fun getScreenWidth(): Int = synchronized(bufferLock) { screenWidth }
+    fun getScreenHeight(): Int = synchronized(bufferLock) { screenHeight }
+
+    fun getScreenContent(): Array<Array<TerminalChar>> = synchronized(bufferLock) { screenBuffer }
     
     /**
      * 获取包含历史记录的完整内容（历史 + 屏幕）
@@ -766,6 +780,26 @@ class AnsiTerminalEmulator(
         for (line in historyBuffer) result.add(line.copyOf())
         for (line in screenBuffer) result.add(line.copyOf())
         result
+    }
+
+    /**
+     * 一次性返回整帧渲染所需的全部一致状态：内容快照 + 历史行数 + 光标位置/可见性。
+     * 在同一把 [bufferLock] 内取齐，保证渲染线程绘制整帧（文字 + 光标）期间，
+     * 不会因 IO 线程 [parse] 中途 scrollUp/移动光标而读到 history 与光标行号错位
+     * 的中间态——这是「排版错乱 / 光标与文字不对齐 / 行序被打乱」的根源。
+     */
+    fun getRenderState(): RenderState = synchronized(bufferLock) {
+        val total = historyBuffer.size + screenBuffer.size
+        val result = ArrayList<Array<TerminalChar>>(total)
+        for (line in historyBuffer) result.add(line.copyOf())
+        for (line in screenBuffer) result.add(line.copyOf())
+        RenderState(
+            fullContent = result,
+            historySize = historyBuffer.size,
+            cursorX = cursorX,
+            cursorY = cursorY,
+            cursorVisible = cursorVisible
+        )
     }
     
     /**
