@@ -318,6 +318,13 @@ class CanvasTerminalView @JvmOverloads constructor(
                     scrollOffsetY += distanceY
                     scrollOffsetY = scrollOffsetY.coerceAtLeast(0f)
                     
+                    // 用户向上滚动（查看历史内容）时禁用自动滚动到底部，
+                    // 避免 TUI 持续输出把视图拉回底部与用户滚动产生振荡→抖动/重影。
+                    // 滚回底部后由 drawTerminal 恢复 autoScrollToBottom = true。
+                    if (distanceY > 0f) {
+                        autoScrollToBottom = false
+                    }
+                    
                     // 保存滚动位置
                     sessionId?.let { id ->
                         onScrollOffsetChanged?.invoke(id, scrollOffsetY)
@@ -439,6 +446,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     fun scrollToBottom() {
         needScrollToBottom = true
         isUserScrolling = false // 恢复自动滚动
+        autoScrollToBottom = true
         isDirty = true
         requestRender()
     }
@@ -528,6 +536,13 @@ class CanvasTerminalView @JvmOverloads constructor(
                     
                     scrollOffsetY += distanceY
                     scrollOffsetY = scrollOffsetY.coerceAtLeast(0f)
+                    
+                    // 用户向上滚动（查看历史内容）时禁用自动滚动到底部，
+                    // 避免 TUI 持续输出把视图拉回底部与用户滚动产生振荡→抖动/重影。
+                    // 滚回底部后由 drawTerminal 恢复 autoScrollToBottom = true。
+                    if (distanceY > 0f) {
+                        autoScrollToBottom = false
+                    }
                     
                     // 保存滚动位置
                     sessionId?.let { id ->
@@ -919,6 +934,12 @@ class CanvasTerminalView @JvmOverloads constructor(
 
         scrollOffsetY = scrollOffsetY.coerceIn(0f, maxScrollOffset)
         val offset = scrollOffsetY
+
+        // 用户滚回底部（或内容不足以滚动）时恢复自动滚动，
+        // 使后续 TUI 新输出能继续自动跟随到底部。
+        if (offset >= maxScrollOffset) {
+            autoScrollToBottom = true
+        }
 
         // 计算可见区域
         val visibleRows = (availHeightCanvas / charHeight).toInt() + 1
