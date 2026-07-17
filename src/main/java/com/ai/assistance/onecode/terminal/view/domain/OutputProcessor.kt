@@ -247,14 +247,13 @@ class OutputProcessor(
             sessionManager.updateSession(sessionId) { session ->
                 session.copy(initState = SessionInitState.READY)
             }
-            
-            // 将首个提示符写入 ANSI 解析器，确保画布立即显示
-            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
-            
-            // 发送欢迎语到 Canvas
+
+            // 先发送欢迎语到 Canvas（内部以 \u001B[2J\u001B[H 清屏后绘制欢迎 ASCII art）。
+            // 之后再写一次提示符，使欢迎语之后紧接可输入的 shell 提示符。
+            // 注意：此前实现先 parse(line) 写入提示符、再 sendWelcomeMessage 清屏、
+            // 再 parse(line) 重写提示符，造成提示符被写入两次而出现"消息显示成两份"。
+            // 这里改为只写一次欢迎语 + 一次提示符，消除重复。
             sendWelcomeMessage(sessionId, sessionManager)
-            
-            // 重新发送当前 prompt 行（清屏操作会清除 prompt）
             sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
         } else {
             Log.d(TAG, "Not a prompt, continuing to wait...")
