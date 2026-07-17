@@ -1,1082 +1,702 @@
-package com.ai.assistance.onecode.terminal.view.domain.ansi
+package com.ai.assistance.onecode.terminal.view.domain
 
-import android.graphics.Color
 import android.util.Log
-import java.util.concurrent.CopyOnWriteArrayList
+import com.ai.assistance.onecode.terminal.CommandExecutionEvent
+import com.ai.assistance.onecode.terminal.SessionDirectoryEvent
+import com.ai.assistance.onecode.terminal.SessionManager
+import com.ai.assistance.onecode.terminal.data.SessionInitState
+import com.ai.assistance.onecode.terminal.data.TerminalSessionData
+import com.ai.assistance.onecode.terminal.view.domain.ansi.AnsiUtils
 
 /**
- * 整帧渲染所需的一致快照：内容 + 光标位置/可见性，在同一把 [AnsiTerminalEmulator.bufferLock]
- * 内一次性取齐，保证渲染线程整帧绘制期间不会读到 IO 线程 parse 写到一半的中间态
- * （光标行号与 history 错位 → "排版错乱"）。
+ * 终端输出的会话处理状态
+ * @property justHandledCarriageReturn 如果最近处理的行分隔符是回车符（CR），则为 true
  */
-data class RenderState(
-    val fullContent: List<Array<TerminalChar>>,
-    val historySize: Int,
-    val cursorX: Int,
-    val cursorY: Int,
-    val cursorVisible: Boolean
+private data class SessionProcessingState(
+    var justHandledCarriageReturn: Boolean = false
 )
 
 /**
- * 终端字符数据
+ * 终端输出处理器
+ * 负责处理和解析终端输出，更新会话状态
  */
-data class TerminalChar(
-    val char: Char = ' ',
-    val attributes: TextAttributes = TextAttributes()
+class OutputProcessor(
+    private val onCommandExecutionEvent: (CommandExecutionEvent) -> Unit = {},
+    private val onDirectoryChangeEvent: (SessionDirectoryEvent) -> Unit = {},
+    private val onCommandCompleted: (String) -> Unit = {}
 ) {
-    constructor(
-        char: Char,
-        fgColor: Int,
-        bgColor: Int,
-        isBold: Boolean = false,
-        isDim: Boolean = false,
-        isItalic: Boolean = false,
-        isUnderline: Boolean = false,
-        isBlinking: Boolean = false,
-        isInverse: Boolean = false,
-        isHidden: Boolean = false,
-        isStrikethrough: Boolean = false
-    ) : this(
-        char,
-        TextAttributes(
-            fgColor, bgColor, isBold, isDim, isItalic,
-            isUnderline, isBlinking, isInverse, isHidden, isStrikethrough
-        )
-    )
-    
-    // 兼容旧 API
-    val fgColor: Int get() = attributes.fgColor
-    val bgColor: Int get() = attributes.bgColor
-    val isBold: Boolean get() = attributes.isBold
-    val isDim: Boolean get() = attributes.isDim
-    val isItalic: Boolean get() = attributes.isItalic
-    val isUnderline: Boolean get() = attributes.isUnderline
-    val isBlinking: Boolean get() = attributes.isBlinking
-    val isInverse: Boolean get() = attributes.isInverse
-    val isHidden: Boolean get() = attributes.isHidden
-    val isStrikethrough: Boolean get() = attributes.isStrikethrough
-}
 
-/**
- * ANSI 终端模拟器
- * 完整实现 VT100/xterm 终端模拟
- */
-class AnsiTerminalEmulator(
-    private var screenWidth: Int = 40,
-    private var screenHeight: Int = 60,
-    private val historySize: Int = 200 // 历史缓冲区行数
-) {
+    private val sessionStates = mutableMapOf<String, SessionProcessingState>()
+
     companion object {
-        private const val TAG = "AnsiTerminalEmulator"
-        private const val TAB_SIZE = 8
+        private const val TAG = "OutputProcessor"
+        private const val MAX_LINES_PER_HISTORY_ITEM = 10
     }
-    
-    // 屏幕缓冲区
-    private var screenBuffer: Array<Array<TerminalChar>> =
-        Array(screenHeight) { Array(screenWidth) { TerminalChar() } }
-    
-    // 行元数据：标记每一行是否是软换行（因宽度限制自动换行，而非真正的\n）
-    private var lineWrapped: BooleanArray = BooleanArray(screenHeight) { false }
-    
-    // 历史缓冲区（用于滚动回溯）
-    private val historyBuffer: MutableList<Array<TerminalChar>> = mutableListOf()
-    private val historyWrapped: MutableList<Boolean> = mutableListOf()
 
-    // 渲染线程读 / IO线程 parse 写 / 主线程 resize 之间的同步锁。
-    // 滑动消息页时渲染线程密集遍历 fullContent，与 IO 线程并发改 buffer 竞争会导致
-    // 同行取到半改内容、行序错位、排版乱、内容闪重影，故结构性变更与渲染快照都加锁。
-    private val bufferLock = Any()
-    
-    // 备用屏幕缓冲区（用于全屏应用如 vim）
-    private var altScreenBuffer: Array<Array<TerminalChar>>? = null
-    private var isAltScreenActive = false
-    
-    // 光标位置
-    private var cursorX: Int = 0
-    private var cursorY: Int = 0
-    
-    // 当前文本属性
-    private var currentAttributes = TextAttributes()
-    
-    // 保存的光标状态（用于 DECSC/DECRC）
-    private var savedCursorX: Int = 0
-    private var savedCursorY: Int = 0
-    private var savedAttributes = TextAttributes()
-    
-    // 终端模式标志
-    private val terminalModes = mutableMapOf<Int, Boolean>()
-    private var cursorVisible = true
-    private var autoWrapMode = true
-    private var originMode = false
-    
-    // 滚动区域（0-based, inclusive）
-    private var scrollTop = 0
-    private var scrollBottom = screenHeight - 1
-    
-    // 观察者模式：监听终端变化
-    private val changeListeners = CopyOnWriteArrayList<() -> Unit>()
-    
-    // 监听新输出（用于自动滚动到底部）
-    private val newOutputListeners = CopyOnWriteArrayList<() -> Unit>()
-    
-    // 缓存完整内容的视图（避免每次创建新列表）
-    private val fullContentView = FullContentView()
-    
-    // 由上一次 parse 末尾截留下来的、尚未终结的转义序列；本次作为新数据的前缀一起解析，
-    // 修复 ANSI 序列被 PTY 块边界切断后，前导 ESC 在前一帧丢失、本帧的 [31m 被当成普通文本
-    // 渲染出散乱数字/字母的问题。
-    private var pendingSequence: String = ""
-    
     /**
-     * 解析并执行 ANSI 序列
+     * 处理终端输出
      */
-    fun parse(text: String) = synchronized(bufferLock) {
-        val combined = if (pendingSequence.isEmpty()) text else pendingSequence + text
-        pendingSequence = ""
-        val scanner = AnsiScanner(combined)
+    fun processOutput(
+        sessionId: String,
+        chunk: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        session.rawBuffer.append(chunk)
+
+        Log.d(TAG, "Processing chunk for session $sessionId. New buffer size: ${session.rawBuffer.length}")
+
+        // 始终检查全屏模式切换
+        if (detectFullscreenMode(sessionId, session.rawBuffer, sessionManager)) {
+            // 如果检测到模式切换，缓冲区可能已被修改，及早返回以处理下一个块
+            return
+        }
+
+        // 始终更新 ANSI 解析器（用于 Canvas 渲染），包括初始化阶段
+        // 这样用户可以看到初始化过程中的所有输出，包括错误信息
+        session.ansiParser.parse(chunk)
         
-        while (scanner.hasNext()) {
-            // 记录本次扫描的起点：若扫描器返回 Incomplete（流末未终结），从此处回退留待下一帧
-            val seqStart = scanner.getPosition()
-            when (val seq = scanner.scanNext()) {
-                is AnsiSequence.Text -> handleText(seq.char)
-                is AnsiSequence.ControlChar -> handleControlChar(seq)
-                is AnsiSequence.CSI -> handleCSI(seq)
-                is AnsiSequence.OSC -> handleOSC(seq)
-                is AnsiSequence.SingleEscape -> handleSingleEscape(seq)
-                is AnsiSequence.DCS -> handleDCS(seq)
-                is AnsiSequence.Unknown -> {
-                    Log.w(TAG, "Unknown sequence: ${seq.raw}")
-                }
-                is AnsiSequence.Incomplete -> {
-                    // 末尾不完整转义序列，留待下一块再解析
-                    pendingSequence = combined.substring(seqStart)
-                    if (pendingSequence.isNotEmpty()) {
-                        Log.d(TAG, "Deferring incomplete sequence (${pendingSequence.length} chars) to next chunk: firstChar=0x${(pendingSequence.first().code).toString(16)}")
-                    }
-                    break
-                }
-                null -> break
-            }
-        }
-        
-        // 通知监听器内容已改变
-        notifyChange()
-        // 通知新输出监听器
-        notifyNewOutput()
-    }
-    
-    /**
-     * 处理普通文本字符
-     */
-    private fun handleText(char: Char) {
-        val wide = isWideChar(char)
-        val cellWidth = if (wide) 2 else 1
-
-        // 宽字符占两格：若放在最后一列会溢出右边界，需提前换行
-        if (cursorX + cellWidth > screenWidth) {
-            if (autoWrapMode) {
-                // 标记当前行为软换行
-                if (cursorY >= 0 && cursorY < screenHeight) {
-                    lineWrapped[cursorY] = true
-                }
-                cursorX = 0
-                cursorY++
-                if (cursorY > scrollBottom) {
-                    cursorY = scrollBottom
-                    scrollUp(1)
-                }
-            } else {
-                cursorX = screenWidth - cellWidth
-                if (cursorX < 0) cursorX = 0
-            }
+        // 如果在全屏模式下，跳过行解析逻辑（全屏应用自己管理屏幕）
+        if (session.isFullscreen) {
+            // 不需要再次解析，ansiParser 已经更新
+            return
         }
 
-        // 写入字符（宽字符推进两格）
-        if (cursorY < screenHeight && cursorX < screenWidth) {
-            screenBuffer[cursorY][cursorX] = TerminalChar(char, currentAttributes)
-            if (wide && cursorX + 1 < screenWidth) {
-                // 宽字符占第二格：用一个隐藏占位符，避免渲染时光标漂移
-                val attrs = currentAttributes.applyHidden(true)
-                screenBuffer[cursorY][cursorX + 1] = TerminalChar(' ', attrs)
-            }
-            cursorX += cellWidth
-        }
-    }
+        val state = sessionStates.getOrPut(sessionId) { SessionProcessingState() }
 
-    /**
-     * 简易宽字符判断（CJK/全角都占两格）。
-     * 与 view 层 TextMetrics.isWideChar 保持一致。
-     */
-    private fun isWideChar(char: Char): Boolean {
-        val code = char.code
-        return when {
-            code < 0x1100 -> false
-            code in 0x1100..0x115F -> true    // Hangul Jamo
-            code == 0x2329 || code == 0x232A -> true
-            code in 0x2E80..0xA4CF -> true     // CJK 部首/康熙
-            code in 0xAC00..0xD7A3 -> true     // Hangul 音节
-            code in 0xF900..0xFAFF -> true     // CJK 兼容
-            code in 0xFE30..0xFE4F -> true     // CJK 兼容形式
-            code in 0xFF00..0xFF60 -> true      // 全角 ASCII/标点
-            code in 0xFFE0..0xFFE6 -> true     // 全角符号
-            code in 0x1F300..0x1FAFF -> true   // Emoji/符号扩展
-            code in 0x20000..0x3FFFD -> true    // CJK 扩展B-F
-            else -> false
-        }
-    }
-    
-    /**
-     * 处理控制字符
-     */
-    private fun handleControlChar(seq: AnsiSequence.ControlChar) {
-        when (seq.type) {
-            ControlCharType.BELL -> {
-                // 响铃 - 可以触发回调通知
-                Log.d(TAG, "Bell")
-            }
-            ControlCharType.BACKSPACE -> {
-                cursorX = (cursorX - 1).coerceAtLeast(0)
-            }
-            ControlCharType.TAB -> {
-                val nextTabStop = ((cursorX / TAB_SIZE) + 1) * TAB_SIZE
-                cursorX = nextTabStop.coerceAtMost(screenWidth - 1)
-            }
-            ControlCharType.LINE_FEED -> {
-                // 换行符：这是硬换行，不标记为软换行
-                if (cursorY >= 0 && cursorY < screenHeight) {
-                    lineWrapped[cursorY] = false
-                }
-                cursorY++
-                if (cursorY > scrollBottom) {
-                    cursorY = scrollBottom
-                    scrollUp(1)
-                }
-            }
-            ControlCharType.VERTICAL_TAB, ControlCharType.FORM_FEED -> {
-                // 类似换行
-                cursorY++
-                if (cursorY >= screenHeight) {
-                    cursorY = screenHeight - 1
-                    scrollUp(1)
-                }
-            }
-            ControlCharType.CARRIAGE_RETURN -> {
-                cursorX = 0
-            }
-            ControlCharType.DELETE -> {
-                // 删除当前光标位置的字符
-                if (cursorY < screenHeight && cursorX < screenWidth) {
-                    screenBuffer[cursorY][cursorX] = TerminalChar()
-                }
-            }
-            else -> {
-                Log.d(TAG, "Unhandled control char: ${seq.type}")
-            }
-        }
-    }
-    
-    /**
-     * 处理 CSI 序列
-     */
-    private fun handleCSI(csi: AnsiSequence.CSI) {
-        val params = csi.params
-        val p1 = params.firstOrNull() ?: 0
-        
-        when (csi.command) {
-            // 光标移动
-            'H', 'f' -> { // CUP - Cursor Position
-                val row = if (params.isNotEmpty()) (params[0] - 1).coerceAtLeast(0) else 0
-                val col = if (params.size > 1) (params[1] - 1).coerceAtLeast(0) else 0
-                
-                if (originMode) {
-                    cursorY = (scrollTop + row).coerceIn(scrollTop, scrollBottom)
-                    cursorX = col.coerceIn(0, screenWidth - 1)
+        // 从缓冲区中提取并处理行
+        while (session.rawBuffer.isNotEmpty()) {
+            val bufferContent = session.rawBuffer.toString()
+            val newlineIndex = bufferContent.indexOf('\n')
+            val carriageReturnIndex = bufferContent.indexOf('\r')
+
+            if (carriageReturnIndex != -1 && (newlineIndex == -1 || carriageReturnIndex < newlineIndex)) {
+                // We have a carriage return.
+                val line = bufferContent.substring(0, carriageReturnIndex)
+
+                val isCRLF = carriageReturnIndex + 1 < bufferContent.length && bufferContent[carriageReturnIndex + 1] == '\n'
+                val consumedLength = if (isCRLF) carriageReturnIndex + 2 else carriageReturnIndex + 1
+
+                session.rawBuffer.delete(0, consumedLength)
+
+                if (isCRLF) {
+                    // It's a CRLF, treat as a normal line. `processLine` will handle the
+                    // case where this CRLF finalizes a progress-updated line.
+                    Log.d(TAG, "Processing CRLF line: '$line'")
+                    processLine(sessionId, line, sessionManager)
                 } else {
-                    cursorY = row.coerceIn(0, screenHeight - 1)
-                    cursorX = col.coerceIn(0, screenWidth - 1)
+                    // It's just CR, treat as a progress update.
+                    Log.d(TAG, "Processing CR line: '$line'")
+                    handleCarriageReturn(sessionId, line, sessionManager)
                 }
-            }
-            'A' -> { // CUU - Cursor Up
-                val n = p1.coerceAtLeast(1)
-                cursorY = (cursorY - n).coerceAtLeast(scrollTop)
-            }
-            'B' -> { // CUD - Cursor Down
-                val n = p1.coerceAtLeast(1)
-                cursorY = (cursorY + n).coerceAtMost(scrollBottom)
-            }
-            'C' -> { // CUF - Cursor Forward
-                val n = p1.coerceAtLeast(1)
-                cursorX = (cursorX + n).coerceAtMost(screenWidth - 1)
-            }
-            'D' -> { // CUB - Cursor Back
-                val n = p1.coerceAtLeast(1)
-                cursorX = (cursorX - n).coerceAtLeast(0)
-            }
-            'E' -> { // CNL - Cursor Next Line
-                val n = p1.coerceAtLeast(1)
-                cursorY = (cursorY + n).coerceAtMost(scrollBottom)
-                cursorX = 0
-            }
-            'F' -> { // CPL - Cursor Previous Line
-                val n = p1.coerceAtLeast(1)
-                cursorY = (cursorY - n).coerceAtLeast(scrollTop)
-                cursorX = 0
-            }
-            'G' -> { // CHA - Cursor Horizontal Absolute
-                cursorX = (p1 - 1).coerceIn(0, screenWidth - 1)
-            }
-            'd' -> { // VPA - Vertical Position Absolute
-                cursorY = (p1 - 1).coerceIn(0, screenHeight - 1)
-            }
-            
-            // 屏幕清除
-            'J' -> { // ED - Erase in Display
-                when (p1) {
-                    0 -> eraseFromCursorToEnd()
-                    1 -> eraseFromStartToCursor()
-                    2 -> clearScreen()
-                    3 -> clearScreenAndScrollback()
+            } else if (newlineIndex != -1) {
+                // We have a newline without a preceding carriage return.
+                val line = bufferContent.substring(0, newlineIndex)
+                session.rawBuffer.delete(0, newlineIndex + 1)
+                Log.d(TAG, "Processing LF line: '$line'")
+                processLine(sessionId, line, sessionManager)
+            } else {
+                // No full line-terminator found in the buffer.
+                
+                // 首先检查是否是进度行（优先级最高，避免被误判为提示符）
+                if (AnsiUtils.isProgressLine(bufferContent)) {
+                    Log.d(TAG, "Detected progress line in buffer: '$bufferContent'")
+                    val cleanContent = AnsiUtils.stripAnsi(bufferContent)
+                    Log.d(TAG, "Stripped progress line: '$cleanContent'")
+                    handleCarriageReturn(sessionId, bufferContent, sessionManager)
+                    session.rawBuffer.clear()
+                    continue // Re-check buffer in case more data came in
                 }
-            }
-            'K' -> { // EL - Erase in Line
-                when (p1) {
-                    0 -> eraseLineFromCursor()
-                    1 -> eraseLineToCursor()
-                    2 -> eraseLine()
+                
+                // 然后检查是否是提示符
+                val cleanContent = AnsiUtils.stripAnsi(bufferContent)
+                
+                // 检查是否是普通 shell 提示符
+                val isShellPrompt = isPrompt(cleanContent)
+                
+                // 使用 PTY 模式检测是否在等待输入
+                val isWaitingInput = isInteractivePrompt(cleanContent, sessionId, sessionManager)
+                
+                if (isShellPrompt || isWaitingInput) {
+                    Log.d(TAG, "Processing remaining buffer as interactive/shell prompt: '$bufferContent'")
+                    // Since this is not a newline-terminated line, the justHandledCarriageReturn
+                    // state from a previous CR is not relevant here. We reset it to ensure
+                    // the prompt is processed correctly by handleReadyState.
+                    state.justHandledCarriageReturn = false
+                    
+                    // 如果是交互式提示符（非普通 shell 提示符），进入交互模式
+                    if (isWaitingInput && !isShellPrompt) {
+                        handleInteractivePrompt(sessionId, cleanContent, sessionManager)
+                    } else {
+                        processLine(sessionId, bufferContent, sessionManager)
+                    }
+                    session.rawBuffer.clear()
                 }
-            }
-            
-            // 滚动
-            'S' -> scrollUp(p1.coerceAtLeast(1)) // SU - Scroll Up
-            'T' -> scrollDown(p1.coerceAtLeast(1)) // SD - Scroll Down
-            'r' -> { // DECSTBM - Set Scrolling Region
-                val top = if (params.isNotEmpty()) (params[0] - 1).coerceIn(0, screenHeight - 1) else 0
-                val bottom = if (params.size > 1) (params[1] - 1).coerceIn(0, screenHeight - 1) else screenHeight - 1
-                if (top < bottom) {
-                    scrollTop = top
-                    scrollBottom = bottom
-                    cursorX = 0
-                    cursorY = if (originMode) scrollTop else 0
-                }
-            }
-            
-            // 插入/删除
-            'L' -> insertLines(p1.coerceAtLeast(1)) // IL - Insert Lines
-            'M' -> deleteLines(p1.coerceAtLeast(1)) // DL - Delete Lines
-            '@' -> insertChars(p1.coerceAtLeast(1)) // ICH - Insert Characters
-            'P' -> deleteChars(p1.coerceAtLeast(1)) // DCH - Delete Characters
-            'X' -> eraseChars(p1.coerceAtLeast(1)) // ECH - Erase Characters
-            
-            // 文本属性
-            'm' -> handleSGR(params)
-            
-            // 模式设置
-            'h' -> setMode(params, csi.private, true)
-            'l' -> setMode(params, csi.private, false)
-            
-            // 光标保存/恢复 (ANSI.SYS 风格)
-            's' -> saveCursorAndAttrs()
-            'u' -> restoreCursorAndAttrs()
-            
-            else -> {
-                Log.w(TAG, "Unsupported CSI command: ${csi.command} with params: $params")
+                break // Exit loop, wait for more data.
             }
         }
     }
-    
-    /**
-     * 处理 SGR (Select Graphic Rendition) - 文本属性设置
-     */
-    private fun handleSGR(params: List<Int>) {
-        if (params.isEmpty()) {
-            currentAttributes = TextAttributes()
+
+    private fun handleCarriageReturn(sessionId: String, line: String, sessionManager: SessionManager) {
+        val cleanLine = AnsiUtils.stripAnsi(line)
+        val session = sessionManager.getSession(sessionId) ?: return
+        if (session.initState != SessionInitState.READY) {
+            processLine(sessionId, line, sessionManager)
             return
         }
         
-        var i = 0
-        while (i < params.size) {
-            when (val p = params[i]) {
-                0 -> currentAttributes = TextAttributes()
-                1 -> currentAttributes = currentAttributes.applyBold(true)
-                2 -> currentAttributes = currentAttributes.applyDim(true)
-                3 -> currentAttributes = currentAttributes.applyItalic(true)
-                4 -> currentAttributes = currentAttributes.applyUnderline(true)
-                5, 6 -> currentAttributes = currentAttributes.applyBlinking(true)
-                7 -> currentAttributes = currentAttributes.applyInverse(true)
-                8 -> currentAttributes = currentAttributes.applyHidden(true)
-                9 -> currentAttributes = currentAttributes.applyStrikethrough(true)
-                
-                21, 22 -> currentAttributes = currentAttributes.applyBold(false).applyDim(false)
-                23 -> currentAttributes = currentAttributes.applyItalic(false)
-                24 -> currentAttributes = currentAttributes.applyUnderline(false)
-                25 -> currentAttributes = currentAttributes.applyBlinking(false)
-                27 -> currentAttributes = currentAttributes.applyInverse(false)
-                28 -> currentAttributes = currentAttributes.applyHidden(false)
-                29 -> currentAttributes = currentAttributes.applyStrikethrough(false)
-                
-                // 前景色 (标准)
-                in 30..37 -> currentAttributes = currentAttributes.applyForeground(
-                    AnsiColorUtils.getAnsiColor(p - 30)
-                )
-                38 -> { // 扩展前景色
-                    val result = AnsiColorUtils.parseColorFromSgr(params, i + 1)
-                    if (result != null) {
-                        currentAttributes = currentAttributes.applyForeground(result.first)
-                        i += result.second
+        // 检查是否是命令提示符（优先级最高）
+        // 即使是 CR line，如果是提示符也应该作为命令完成处理
+        if (isPrompt(cleanLine.trim())) {
+            Log.d(TAG, "Detected prompt in CR line: '$cleanLine'")
+            handlePrompt(sessionId, cleanLine, sessionManager)
+            sessionStates[sessionId]?.justHandledCarriageReturn = false
+            return
+        }
+        
+        // 只有在清理后的内容非空时才处理为进度更新
+        // 空内容（如 ANSI 控制序列）不应影响下一行的处理
+        if (cleanLine.isNotEmpty()) {
+            updateProgressOutput(sessionId, cleanLine, sessionManager)
+            sessionStates[sessionId]?.justHandledCarriageReturn = true
+        }
+        // 如果是空内容（纯 ANSI 控制序列），不设置 justHandledCarriageReturn
+        // 这样下一行会被正常处理，而不是被当作进度更新
+    }
+
+    private fun processLine(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+
+        when (session.initState) {
+            SessionInitState.INITIALIZING -> {
+                handleInitializingState(sessionId, line, sessionManager)
+            }
+            SessionInitState.LOGGED_IN -> {
+                handleLoggedInState(sessionId, line, sessionManager)
+            }
+            SessionInitState.AWAITING_FIRST_PROMPT -> {
+                handleAwaitingFirstPromptState(sessionId, line, sessionManager)
+            }
+            SessionInitState.READY -> {
+                val state = sessionStates.getOrPut(sessionId) { SessionProcessingState() }
+                if (state.justHandledCarriageReturn) {
+                    // A newline is received after a carriage return. This finalizes the line that was being updated.
+                    state.justHandledCarriageReturn = false // Reset state immediately
+
+                    val cleanLine = AnsiUtils.stripAnsi(line)
+
+                    if (cleanLine.isNotEmpty()) {
+                        updateProgressOutput(sessionId, cleanLine, sessionManager)
                     }
-                }
-                39 -> currentAttributes = currentAttributes.applyForeground(Color.WHITE)
-                
-                // 背景色 (标准)
-                in 40..47 -> currentAttributes = currentAttributes.applyBackground(
-                    AnsiColorUtils.getAnsiColor(p - 40)
-                )
-                48 -> { // 扩展背景色
-                    val result = AnsiColorUtils.parseColorFromSgr(params, i + 1)
-                    if (result != null) {
-                        currentAttributes = currentAttributes.applyBackground(result.first)
-                        i += result.second
+
+                    // Always append a newline to finalize the line and move to the next.
+                    val currentItem = session.currentExecutingCommand
+                    if (currentItem != null) {
+                        session.currentCommandOutput.append('\n')
+                        currentItem.setOutput(session.currentCommandOutput.toString())
                     }
-                }
-                49 -> currentAttributes = currentAttributes.applyBackground(Color.BLACK)
-                
-                // 前景色 (明亮)
-                in 90..97 -> currentAttributes = currentAttributes.applyForeground(
-                    AnsiColorUtils.getAnsiBrightColor(p - 90)
-                )
-                
-                // 背景色 (明亮)
-                in 100..107 -> currentAttributes = currentAttributes.applyBackground(
-                    AnsiColorUtils.getAnsiBrightColor(p - 100)
-                )
-                
-                else -> Log.w(TAG, "Unsupported SGR parameter: $p")
-            }
-            i++
-        }
-    }
-    
-    /**
-     * 设置终端模式
-     */
-    private fun setMode(params: List<Int>, isPrivate: Boolean, enable: Boolean) {
-        for (param in params) {
-            terminalModes[param] = enable
-            
-            if (isPrivate) {
-                when (param) {
-                    1 -> {} // DECCKM - 光标键模式
-                    3 -> {} // DECCOLM - 132列模式
-                    6 -> originMode = enable // DECOM - 原点模式
-                    7 -> autoWrapMode = enable // DECAWM - 自动换行模式
-                    25 -> cursorVisible = enable // DECTCEM - 光标可见性
-                    1049 -> toggleAltScreen(enable) // 备用屏幕缓冲区
-                    2004 -> {} // Bracketed paste mode
+                } else {
+                    handleReadyState(sessionId, line, sessionManager)
                 }
             }
         }
     }
-    
-    /**
-     * 切换备用屏幕
-     */
-    private fun toggleAltScreen(enable: Boolean) {
-        if (enable && !isAltScreenActive) {
-            // 保存主屏幕，切换到备用屏幕
-            altScreenBuffer = screenBuffer
-            screenBuffer = Array(screenHeight) { Array(screenWidth) { TerminalChar() } }
-            isAltScreenActive = true
-            cursorX = 0
-            cursorY = 0
-        } else if (!enable && isAltScreenActive) {
-            // 恢复主屏幕
-            altScreenBuffer?.let {
-                screenBuffer = it
-                altScreenBuffer = null
-            }
-            isAltScreenActive = false
-        }
-    }
-    
-    /**
-     * 处理 OSC (Operating System Command)
-     */
-    private fun handleOSC(osc: AnsiSequence.OSC) {
-        when (osc.command) {
-            0, 1, 2 -> { // 设置窗口标题
-                Log.d(TAG, "Set window title: ${osc.data}")
-            }
-            4 -> { // 设置颜色调色板
-                Log.d(TAG, "Set color palette: ${osc.data}")
-            }
-            else -> {
-                Log.d(TAG, "Unsupported OSC command: ${osc.command}")
+
+    private fun handleInitializingState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        if (line.contains("LOGIN_SUCCESSFUL")) {
+            Log.d(TAG, "Login successful marker found.")
+            sessionManager.getSession(sessionId)?.let { session ->
+                session.currentCommandOutput.clear()
+                sessionManager.updateSession(sessionId) {
+                    it.copy(initState = SessionInitState.LOGGED_IN)
+                }
             }
         }
     }
-    
-    /**
-     * 处理单字符转义序列
-     */
-    private fun handleSingleEscape(seq: AnsiSequence.SingleEscape) {
-        when (seq.char) {
-            '7' -> saveCursorAndAttrs() // DECSC
-            '8' -> restoreCursorAndAttrs() // DECRC
-            'c' -> resetTerminal() // RIS
-            'D' -> { // IND - Index (move down, scroll if needed)
-                cursorY++
-                if (cursorY > scrollBottom) {
-                    cursorY = scrollBottom
-                    scrollUp(1)
-                }
+
+    private fun handleLoggedInState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        if (AnsiUtils.stripAnsi(line).contains("TERMINAL_READY")) {
+            Log.d(TAG, "TERMINAL_READY marker found.")
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(initState = SessionInitState.AWAITING_FIRST_PROMPT)
             }
-            'E' -> { // NEL - Next Line
-                cursorX = 0
-                cursorY++
-                if (cursorY > scrollBottom) {
-                    cursorY = scrollBottom
-                    scrollUp(1)
-                }
-            }
-            'H' -> {} // HTS - Set Tab Stop
-            'M' -> { // RI - Reverse Index (move up, scroll if needed)
-                cursorY--
-                if (cursorY < scrollTop) {
-                    cursorY = scrollTop
-                    scrollDown(1)
-                }
-            }
-            'Z' -> {} // DECID - Identify Terminal
-            else -> Log.w(TAG, "Unsupported single escape: ${seq.char}")
         }
     }
-    
-    /**
-     * 处理 DCS (Device Control String)
-     */
-    private fun handleDCS(dcs: AnsiSequence.DCS) {
-        Log.d(TAG, "DCS sequence (not implemented): ${dcs.data}")
-    }
-    
-    // === 屏幕操作方法 ===
-    
-    private fun scrollUp(lines: Int = 1) {
-        for (i in 0 until lines) {
-            // 将滚动出去的顶行添加到历史缓冲区（仅当不在备用屏幕时）
-            if (!isAltScreenActive && scrollTop == 0) {
-                // 复制顶行到历史缓冲区
-                val topLine = screenBuffer[scrollTop].copyOf()
-                val topWrapped = lineWrapped[scrollTop]
-                historyBuffer.add(topLine)
-                historyWrapped.add(topWrapped)
-                
-                // 限制历史缓冲区大小
-                if (historyBuffer.size > historySize) {
-                    historyBuffer.removeAt(0)
-                    historyWrapped.removeAt(0)
-                }
+
+    private fun handleAwaitingFirstPromptState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        val cleanLine = AnsiUtils.stripAnsi(line)
+        Log.d(TAG, "handleAwaitingFirstPromptState: checking line: '$cleanLine'")
+        if (handlePrompt(sessionId, cleanLine, sessionManager)) {
+            Log.d(TAG, "First prompt detected. Session is now ready.")
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(initState = SessionInitState.READY)
             }
             
-            for (y in scrollTop until scrollBottom) {
-                screenBuffer[y] = screenBuffer[y + 1]
-                lineWrapped[y] = lineWrapped[y + 1]
+            // 将首个提示符写入 ANSI 解析器，确保画布立即显示
+            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
+            
+            // 发送欢迎语到 Canvas
+            sendWelcomeMessage(sessionId, sessionManager)
+            
+            // 重新发送当前 prompt 行（清屏操作会清除 prompt）
+            sessionManager.getSession(sessionId)?.ansiParser?.parse(line)
+        } else {
+            Log.d(TAG, "Not a prompt, continuing to wait...")
+        }
+    }
+
+    private fun handleReadyState(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ) {
+        val cleanLine = AnsiUtils.stripAnsi(line)
+        Log.d(TAG, "Stripped line: '$cleanLine'")
+
+        // 跳过TERMINAL_READY信号
+        if (cleanLine.trim() == "TERMINAL_READY") {
+            return
+        }
+
+        val session = sessionManager.getSession(sessionId) ?: return
+
+        // 检测命令回显
+        if (isCommandEcho(cleanLine, session)) {
+            Log.d(TAG, "Ignoring command echo: '$cleanLine'")
+            return
+        }
+
+        // 优先处理常规提示符，因为它表示命令结束
+        if (handlePrompt(sessionId, cleanLine, sessionManager)) {
+            return
+        }
+
+        // 注意：不在这里检测交互式提示符，因为这里处理的是以 CRLF 结束的完整行
+        // 真正的交互式提示符通常不以换行结束，会在 buffer 末尾被检测到（第 118 行）
+
+        // 处理普通输出
+        updateCommandOutput(sessionId, cleanLine, sessionManager)
+    }
+
+    /**
+     * 检测是否是提示符
+     */
+    fun isPrompt(line: String): Boolean {
+        val cwdPromptRegex = Regex("<cwd>(.*)</cwd>.*[#$]")
+        if (cwdPromptRegex.containsMatchIn(line)) {
+            return true
+        }
+
+        val trimmed = line.trim()
+        return trimmed.endsWith("$") ||
+                trimmed.endsWith("#") ||
+                trimmed.endsWith("$ ") ||
+                trimmed.endsWith("# ") ||
+                Regex(".*@[a-zA-Z0-9.\\-]+\\s?:\\s?~?/?.*[#$]\\s*$").matches(trimmed) ||
+                Regex("root@[a-zA-Z0-9.\\-]+:\\s?~?/?.*#\\s*$").matches(trimmed)
+    }
+
+    /**
+     * 处理提示符
+     */
+    private fun handlePrompt(
+        sessionId: String,
+        line: String,
+        sessionManager: SessionManager
+    ): Boolean {
+        val session = sessionManager.getSession(sessionId) ?: return false
+
+        val cwdPromptRegex = Regex("<cwd>(.*)</cwd>.*[#$]")
+        val match = cwdPromptRegex.find(line)
+
+        val isAPrompt = if (match != null) {
+            val path = match.groups[1]?.value?.trim() ?: "~"
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(currentDirectory = "$path $")
             }
-            screenBuffer[scrollBottom] = Array(screenWidth) { 
-                TerminalChar(attributes = currentAttributes.copy(
-                    fgColor = Color.WHITE,
-                    bgColor = Color.BLACK,
-                    isBold = false,
-                    isDim = false,
-                    isItalic = false,
-                    isUnderline = false,
-                    isBlinking = false,
-                    isInverse = false,
-                    isHidden = false,
-                    isStrikethrough = false
+            
+            // 发出目录变化事件
+            onDirectoryChangeEvent(SessionDirectoryEvent(
+                sessionId = sessionId,
+                currentDirectory = "$path $"
+            ))
+            
+            Log.d(TAG, "Matched CWD prompt. Path: $path")
+
+            val outputBeforePrompt = line.substring(0, match.range.first)
+            if (outputBeforePrompt.isNotBlank()) {
+                session.currentCommandOutput.append(outputBeforePrompt)
+            }
+            true
+        } else {
+            val trimmed = line.trim()
+            val isFallbackPrompt = trimmed.endsWith("$") ||
+                    trimmed.endsWith("#") ||
+                    trimmed.endsWith("$ ") ||
+                    trimmed.endsWith("# ") ||
+                    Regex(".*@[a-zA-Z0-9.\\-]+\\s?:\\s?~?/?.*[#$]\\s*$").matches(trimmed) ||
+                    Regex("root@[a-zA-Z0-9.\\-]+:\\s?~?/?.*#\\s*$").matches(trimmed)
+
+            if (isFallbackPrompt) {
+                val regex = Regex(""".*:\s*(~?/?.*)\s*[#$]$""")
+                val matchResult = regex.find(trimmed)
+                val cleanPrompt = matchResult?.groups?.get(1)?.value?.trim() ?: trimmed
+                sessionManager.updateSession(sessionId) { session ->
+                    session.copy(currentDirectory = "${cleanPrompt} $")
+                }
+                
+                // 发出目录变化事件
+                onDirectoryChangeEvent(SessionDirectoryEvent(
+                    sessionId = sessionId,
+                    currentDirectory = "${cleanPrompt} $"
                 ))
-            }
-            lineWrapped[scrollBottom] = false
-        }
-    }
-    
-    private fun scrollDown(lines: Int = 1) {
-        for (i in 0 until lines) {
-            for (y in scrollBottom downTo scrollTop + 1) {
-                screenBuffer[y] = screenBuffer[y - 1]
-            }
-            screenBuffer[scrollTop] = Array(screenWidth) { TerminalChar() }
-        }
-    }
-    
-    private fun clearScreen() {
-        for (y in 0 until screenHeight) {
-            for (x in 0 until screenWidth) {
-                screenBuffer[y][x] = TerminalChar()
+                
+                Log.d(TAG, "Matched fallback prompt: $cleanPrompt")
+                true
+            } else {
+                false
             }
         }
-        cursorX = 0
-        cursorY = 0
-    }
-    
-    private fun clearScreenAndScrollback() {
-        clearScreen()
-        // 清除历史缓冲区
-        historyBuffer.clear()
-    }
-    
-    private fun eraseFromCursorToEnd() {
-        // 清除当前行从光标到行尾
-        for (x in cursorX until screenWidth) {
-            screenBuffer[cursorY][x] = TerminalChar()
+
+        if (isAPrompt) {
+            // 检测到常规提示符，表示我们回到了shell。
+            // 确保退出任何持久的交互模式。
+            if (session.isInteractiveMode) {
+                sessionManager.updateSession(sessionId) {
+                    it.copy(
+                        isInteractiveMode = false,
+                        interactivePrompt = ""
+                    )
+                }
+            }
+            finishCurrentCommand(sessionId, sessionManager)
+            return true
         }
-        // 清除下面所有行
-        for (y in cursorY + 1 until screenHeight) {
-            for (x in 0 until screenWidth) {
-                screenBuffer[y][x] = TerminalChar()
+        return false
+    }
+
+    /**
+     * 使用 PTY 模式检测是否正在等待交互式输入
+     * 完全依赖 PTY 层面的状态，不使用任何文本模式匹配
+     */
+    fun isInteractivePrompt(line: String, sessionId: String, sessionManager: SessionManager): Boolean {
+        val session = sessionManager.getSession(sessionId) ?: return false
+        val pty = session.pty ?: return false
+        
+        // 只在有命令执行时才检测（避免误判普通 shell 提示符）
+        if (session.currentExecutingCommand?.isExecuting != true) {
+            return false
+        }
+        
+        try {
+            val ptyMode = pty.getPtyMode()
+            val isWaiting = ptyMode.isWaitingForInput()
+            
+            if (!isWaiting) {
+                return false
+            }
+            
+            // 无论 canonical 还是 non-canonical mode，都完全依赖 PTY 状态判断
+            // 不使用任何文本模式匹配或关键词判断
+            val mode = if (ptyMode.isCanonicalMode) "canonical" else "non-canonical"
+            Log.d(TAG, "Detected interactive prompt ($mode mode, available=${ptyMode.availableBytes}): $line")
+            
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking PTY mode", e)
+            return false
+        }
+    }
+
+
+
+    private fun handleInteractivePrompt(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
+    ) {
+        Log.d(TAG, "Detected interactive prompt: $cleanLine")
+        val session = sessionManager.getSession(sessionId) ?: return
+        
+        sessionManager.updateSession(sessionId) { session ->
+            session.copy(
+                isWaitingForInteractiveInput = true,
+                lastInteractivePrompt = cleanLine,
+                isInteractiveMode = true, // 统一标记为交互模式
+                interactivePrompt = cleanLine
+            )
+        }
+
+        // 将交互式提示添加到当前命令的输出中
+        if (cleanLine.isNotBlank()) {
+            updateCommandOutput(sessionId, cleanLine, sessionManager)
+        }
+    }
+
+
+
+    private fun isCommandEcho(cleanLine: String, session: TerminalSessionData): Boolean {
+        val lastExecutingItem = session.currentExecutingCommand
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+            val commandToCheck = lastExecutingItem.command.trim()
+            val lineToCheck = cleanLine.trim()
+            val isMatch = lineToCheck == commandToCheck
+
+            if (session.currentCommandOutput.isEmpty() && isMatch) {
+                return true
             }
         }
+        return false
     }
-    
-    private fun eraseFromStartToCursor() {
-        // 清除上面所有行
-        for (y in 0 until cursorY) {
-            for (x in 0 until screenWidth) {
-                screenBuffer[y][x] = TerminalChar()
-            }
-        }
-        // 清除当前行从行首到光标
-        for (x in 0..cursorX) {
-            screenBuffer[cursorY][x] = TerminalChar()
-        }
-    }
-    
-    private fun eraseLineFromCursor() {
-        for (x in cursorX until screenWidth) {
-            screenBuffer[cursorY][x] = TerminalChar()
-        }
-    }
-    
-    private fun eraseLineToCursor() {
-        for (x in 0..cursorX) {
-            screenBuffer[cursorY][x] = TerminalChar()
-        }
-    }
-    
-    private fun eraseLine() {
-        for (x in 0 until screenWidth) {
-            screenBuffer[cursorY][x] = TerminalChar()
-        }
-    }
-    
-    private fun insertLines(n: Int) {
-        for (i in 0 until n) {
-            for (y in scrollBottom downTo cursorY + 1) {
-                screenBuffer[y] = screenBuffer[y - 1]
-            }
-            screenBuffer[cursorY] = Array(screenWidth) { TerminalChar() }
-        }
-    }
-    
-    private fun deleteLines(n: Int) {
-        for (i in 0 until n) {
-            for (y in cursorY until scrollBottom) {
-                screenBuffer[y] = screenBuffer[y + 1]
-            }
-            screenBuffer[scrollBottom] = Array(screenWidth) { TerminalChar() }
-        }
-    }
-    
-    private fun insertChars(n: Int) {
-        val line = screenBuffer[cursorY]
-        for (i in 0 until n.coerceAtMost(screenWidth - cursorX)) {
-            for (x in screenWidth - 1 downTo cursorX + 1) {
-                line[x] = line[x - 1]
-            }
-            line[cursorX] = TerminalChar()
-        }
-    }
-    
-    private fun deleteChars(n: Int) {
-        val line = screenBuffer[cursorY]
-        for (i in 0 until n.coerceAtMost(screenWidth - cursorX)) {
-            for (x in cursorX until screenWidth - 1) {
-                line[x] = line[x + 1]
-            }
-            line[screenWidth - 1] = TerminalChar()
-        }
-    }
-    
-    private fun eraseChars(n: Int) {
-        for (x in cursorX until (cursorX + n).coerceAtMost(screenWidth)) {
-            screenBuffer[cursorY][x] = TerminalChar()
-        }
-    }
-    
-    private fun saveCursorAndAttrs() {
-        savedCursorX = cursorX
-        savedCursorY = cursorY
-        savedAttributes = currentAttributes
-    }
-    
-    private fun restoreCursorAndAttrs() {
-        cursorX = savedCursorX
-        cursorY = savedCursorY
-        currentAttributes = savedAttributes
-    }
-    
-    private fun resetTerminal() {
-        clearScreen()
-        currentAttributes = TextAttributes()
-        cursorX = 0
-        cursorY = 0
-        scrollTop = 0
-        scrollBottom = screenHeight - 1
-        terminalModes.clear()
-        autoWrapMode = true
-        originMode = false
-        cursorVisible = true
-    }
-    
-    // === 公共 API ===
-    
-    fun renderScreenToString(): String {
-        val builder = StringBuilder()
-        for (y in 0 until screenHeight) {
-            for (x in 0 until screenWidth) {
-                builder.append(screenBuffer[y][x].char)
-            }
-            if (y < screenHeight - 1) {
+
+    private fun updateCommandOutput(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
+    ) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        val currentItem = session.currentExecutingCommand
+
+        if (currentItem != null && currentItem.isExecuting) {
+            val builder = session.currentCommandOutput
+            // 确保输出之间有换行符
+            if (builder.isNotEmpty() && builder.last() != '\n') {
                 builder.append('\n')
             }
-        }
-        return builder.toString()
-    }
-    
-    // 单点查询均加锁，避免与 IO 线程 parse 中的 scrollUp/cursorX/Y 修改并发读取到中间态。
-    fun getCursorX(): Int = synchronized(bufferLock) { cursorX }
-    fun getCursorY(): Int = synchronized(bufferLock) { cursorY }
-    fun isCursorVisible(): Boolean = synchronized(bufferLock) { cursorVisible }
-    fun getScreenWidth(): Int = synchronized(bufferLock) { screenWidth }
-    fun getScreenHeight(): Int = synchronized(bufferLock) { screenHeight }
+            builder.append(cleanLine)
 
-    fun getScreenContent(): Array<Array<TerminalChar>> = synchronized(bufferLock) { screenBuffer }
-    
-    /**
-     * 获取包含历史记录的完整内容（历史 + 屏幕）
-     */
-    fun getFullContent(): List<Array<TerminalChar>> {
-        return fullContentView
-    }
-
-    /**
-     * 返回历史+屏幕缓冲的稳定快照（行深拷贝），供渲染线程整帧使用。
-     * 在 bufferLock 内拷贝，期间 IO 线程的 parse 写入会被阻塞，保证本帧
-     * 不会被半改内容污染、行序不会被增删打乱 → 消除"消息显示成两个/排版乱/闪重影"。
-     */
-    fun getFullContentSnapshot(): List<Array<TerminalChar>> = synchronized(bufferLock) {
-        val total = historyBuffer.size + screenBuffer.size
-        val result = ArrayList<Array<TerminalChar>>(total)
-        for (line in historyBuffer) result.add(line.copyOf())
-        for (line in screenBuffer) result.add(line.copyOf())
-        result
-    }
-
-    /**
-     * 一次性返回整帧渲染所需的全部一致状态：内容快照 + 历史行数 + 光标位置/可见性。
-     * 在同一把 [bufferLock] 内取齐，保证渲染线程绘制整帧（文字 + 光标）期间，
-     * 不会因 IO 线程 [parse] 中途 scrollUp/移动光标而读到 history 与光标行号错位
-     * 的中间态——这是「排版错乱 / 光标与文字不对齐 / 行序被打乱」的根源。
-     */
-    fun getRenderState(): RenderState = synchronized(bufferLock) {
-        val total = historyBuffer.size + screenBuffer.size
-        val result = ArrayList<Array<TerminalChar>>(total)
-        for (line in historyBuffer) result.add(line.copyOf())
-        for (line in screenBuffer) result.add(line.copyOf())
-        RenderState(
-            fullContent = result,
-            historySize = historyBuffer.size,
-            cursorX = cursorX,
-            cursorY = cursorY,
-            cursorVisible = cursorVisible
-        )
-    }
-    
-    /**
-     * 内部类：提供历史+屏幕缓冲的统一视图，避免每次创建新列表
-     */
-    private inner class FullContentView : AbstractList<Array<TerminalChar>>() {
-        override val size: Int
-            get() = historyBuffer.size + screenBuffer.size
-        
-        override fun get(index: Int): Array<TerminalChar> {
-            return if (index < historyBuffer.size) {
-                historyBuffer[index]
-            } else {
-                screenBuffer[index - historyBuffer.size]
-            }
-        }
-    }
-    
-    /**
-     * 获取历史缓冲区大小
-     */
-    fun getHistorySize(): Int = synchronized(bufferLock) { historyBuffer.size }
-    
-    fun resize(newWidth: Int, newHeight: Int) = synchronized(bufferLock) {
-        if (newWidth == screenWidth && newHeight == screenHeight) return
-
-        // 备用屏（如 opencode 这类全屏 TUI）不参与主屏的 reflow：TUI 自己用光标定位绘制，
-        // 主屏式的「软换行合并/去尾空白/光标移到底」会把它二次重排并错位。这里只按新尺寸
-        // 原样截断或填充，光标就地钳制；交给 TUI 收到 SIGWINCH 后自行清屏重绘。
-        if (isAltScreenActive) {
-            resizeAltScreen(newWidth, newHeight)
-            notifyChange()
-            return
-        }
-
-        // 主屏：reflow 保留历史滚动
-        // 主流程：收集 -> 清理 -> 重排 -> 分配
-        val logicalLines = collectLogicalLines()
-        trimTrailingEmptyLines(logicalLines)
-        val (newPhysicalLines, newPhysicalWrapped) = rewrapLogicalLines(logicalLines, newWidth)
-        
-        // 更新尺寸并重建缓冲区
-        screenWidth = newWidth
-        screenHeight = newHeight
-        distributeToBuffers(newPhysicalLines, newPhysicalWrapped)
-        
-        // 重置滚动区域和光标
-        scrollTop = 0
-        scrollBottom = screenHeight - 1
-        cursorX = 0
-        
-        notifyChange()
-    }
-
-    /**
-     * 备用屏专用 resize：不参与主屏的 reflow。
-     * 只按新尺寸原样截断/填充缓冲，光标就地钳制，软换行标记清零，
-     * 把布局交给 TUI 自己在收到 SIGWINCH 后清屏重绘，避免主屏式重排把
-     * 用光标定位画好的 TUI 内容二次折行/去尾空白/移光标到底而错位。
-     */
-    private fun resizeAltScreen(newWidth: Int, newHeight: Int) {
-        val newBuffer = Array(newHeight) { Array(newWidth) { TerminalChar() } }
-        val copyHeight = minOf(screenHeight, newHeight)
-        val copyWidth = minOf(screenWidth, newWidth)
-        for (y in 0 until copyHeight) {
-            for (x in 0 until copyWidth) {
-                newBuffer[y][x] = screenBuffer[y][x]
-            }
-        }
-        screenBuffer = newBuffer
-        lineWrapped = BooleanArray(newHeight) { false }
-        screenWidth = newWidth
-        screenHeight = newHeight
-        scrollTop = 0
-        scrollBottom = screenHeight - 1
-        cursorX = cursorX.coerceIn(0, (screenWidth - 1).coerceAtLeast(0))
-        cursorY = cursorY.coerceIn(0, (screenHeight - 1).coerceAtLeast(0))
-    }
-
-    /**
-     * 收集所有逻辑行（合并历史+屏幕的软换行）
-     */
-    private fun collectLogicalLines(): MutableList<MutableList<TerminalChar>> {
-        val logicalLines = mutableListOf<MutableList<TerminalChar>>()
-        var currentLogicalLine = mutableListOf<TerminalChar>()
-        
-        // 辅助函数：处理一行物理行
-        fun processPhysicalLine(line: Array<TerminalChar>, isWrapped: Boolean) {
-            // 计算有效长度：软换行取整行，硬换行去除末尾空白
-            val effectiveLength = if (isWrapped) {
-                line.size
-            } else {
-                findLastNonEmptyIndex(line) + 1
-            }
+            // 实时更新当前输出块
+            currentItem.setOutput(builder.toString())
+            session.currentOutputLineCount++
             
-            // 添加有效字符到当前逻辑行
-            for (i in 0 until effectiveLength) {
-                currentLogicalLine.add(line[i])
-            }
-            
-            // 硬换行：逻辑行结束
-            if (!isWrapped) {
-                logicalLines.add(currentLogicalLine)
-                currentLogicalLine = mutableListOf()
-            }
-        }
-        
-        // 处理历史缓冲区
-        for (i in historyBuffer.indices) {
-            processPhysicalLine(historyBuffer[i], historyWrapped[i])
-        }
-        
-        // 处理屏幕缓冲区
-        for (i in 0 until screenHeight) {
-            processPhysicalLine(screenBuffer[i], lineWrapped[i])
-        }
-        
-        // 处理残留的逻辑行（最后一行是软换行的情况）
-        if (currentLogicalLine.isNotEmpty()) {
-            logicalLines.add(currentLogicalLine)
-        }
-        
-        return logicalLines
-    }
-    
-    /**
-     * 查找行中最后一个非空字符的索引
-     */
-    private fun findLastNonEmptyIndex(line: Array<TerminalChar>): Int {
-        for (i in line.size - 1 downTo 0) {
-            val c = line[i]
-            // 检查是否为空白字符（无内容无样式）
-            if (c.char != ' ' || c.bgColor != Color.BLACK || c.isInverse || c.isUnderline || c.isStrikethrough) {
-                return i
-            }
-        }
-        return -1 // 整行都是空白
-    }
-    
-    /**
-     * 移除末尾连续的空逻辑行
-     */
-    private fun trimTrailingEmptyLines(logicalLines: MutableList<MutableList<TerminalChar>>) {
-        while (logicalLines.isNotEmpty()) {
-            val lastLine = logicalLines.last()
-            if (lastLine.isEmpty() || lastLine.all { 
-                it.char == ' ' && it.bgColor == Color.BLACK && !it.isInverse && !it.isUnderline 
-            }) {
-                logicalLines.removeAt(logicalLines.size - 1)
-            } else {
-                break
+            // 发出命令执行过程事件
+            onCommandExecutionEvent(CommandExecutionEvent(
+                commandId = currentItem.id,
+                sessionId = sessionId,
+                outputChunk = cleanLine,
+                isCompleted = false
+            ))
+
+            if (session.currentOutputLineCount >= MAX_LINES_PER_HISTORY_ITEM) {
+                // 当前页已满，将其添加到已完成的页面列表并开始新的一页
+                currentItem.outputPages.add(currentItem.output)
+                builder.clear()
+                session.currentOutputLineCount = 0
+                currentItem.setOutput("") // 为新页面清空实时输出
             }
         }
     }
-    
-    /**
-     * 根据新宽度重新折行
-     */
-    private fun rewrapLogicalLines(
-        logicalLines: List<List<TerminalChar>>,
-        newWidth: Int
-    ): Pair<List<Array<TerminalChar>>, List<Boolean>> {
-        val physicalLines = mutableListOf<Array<TerminalChar>>()
-        val wrappedFlags = mutableListOf<Boolean>()
-        
-        for (logicalLine in logicalLines) {
-            if (logicalLine.isEmpty()) {
-                // 空逻辑行（真正的空行）
-                physicalLines.add(Array(newWidth) { TerminalChar() })
-                wrappedFlags.add(false)
-                continue
-            }
-            
-            // 将逻辑行按新宽度切分成多个物理行
-            var offset = 0
-            while (offset < logicalLine.size) {
-                val chunkSize = (logicalLine.size - offset).coerceAtMost(newWidth)
-                val chunk = Array(newWidth) { TerminalChar() }
-                
-                for (i in 0 until chunkSize) {
-                    chunk[i] = logicalLine[offset + i]
-                }
-                
-                offset += chunkSize
-                val isWrapped = offset < logicalLine.size // 还有剩余内容则标记为软换行
-                
-                physicalLines.add(chunk)
-                wrappedFlags.add(isWrapped)
-            }
-        }
-        
-        return Pair(physicalLines, wrappedFlags)
-    }
-    
-    /**
-     * 将物理行分配到历史缓冲区和屏幕缓冲区
-     */
-    private fun distributeToBuffers(
-        physicalLines: List<Array<TerminalChar>>,
-        wrappedFlags: List<Boolean>
+
+    private fun updateProgressOutput(
+        sessionId: String,
+        cleanLine: String,
+        sessionManager: SessionManager
     ) {
-        historyBuffer.clear()
-        historyWrapped.clear()
-        screenBuffer = Array(screenHeight) { Array(screenWidth) { TerminalChar() } }
-        lineWrapped = BooleanArray(screenHeight) { false }
-        
-        val totalLines = physicalLines.size
-        
-        if (totalLines <= screenHeight) {
-            // 内容不足一屏，直接填充屏幕
-            for (i in 0 until totalLines) {
-                screenBuffer[i] = physicalLines[i]
-                lineWrapped[i] = wrappedFlags[i]
+        val session = sessionManager.getSession(sessionId) ?: return
+        val builder = session.currentCommandOutput
+        val lastExecutingItem = session.currentExecutingCommand
+
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+             // More efficient way to replace the last line
+            val lastNewlineIndex = builder.lastIndexOf('\n')
+            if (lastNewlineIndex != -1) {
+                // Found a newline, replace everything after it
+                builder.setLength(lastNewlineIndex + 1)
+                builder.append(cleanLine)
+            } else {
+                // No newline, replace the whole buffer
+                builder.clear()
+                builder.append(cleanLine)
             }
-            cursorY = (totalLines - 1).coerceAtLeast(0)
-        } else {
-            // 内容超过一屏，分流到历史和屏幕
-            val historyCount = totalLines - screenHeight
-            val startHistoryIdx = (historyCount - historySize).coerceAtLeast(0)
-            
-            // 填充历史缓冲区（受限于 historySize）
-            for (i in startHistoryIdx until historyCount) {
-                historyBuffer.add(physicalLines[i])
-                historyWrapped.add(wrappedFlags[i])
-            }
-            
-            // 填充屏幕缓冲区（最后 screenHeight 行）
-            for (i in 0 until screenHeight) {
-                screenBuffer[i] = physicalLines[historyCount + i]
-                lineWrapped[i] = wrappedFlags[historyCount + i]
-            }
-            
-            cursorY = screenHeight - 1
+            // Update history from the builder
+            lastExecutingItem.setOutput(builder.toString().trimEnd())
         }
     }
-    
-    // === 观察者模式方法 ===
-    
-    /**
-     * 添加变化监听器
-     */
-    fun addChangeListener(listener: () -> Unit) {
-        changeListeners.add(listener)
+
+    private fun finishCurrentCommand(sessionId: String, sessionManager: SessionManager) {
+        sessionManager.updateSession(sessionId) { session ->
+            session.copy(
+                isWaitingForInteractiveInput = false,
+                lastInteractivePrompt = "",
+                isInteractiveMode = false,
+                interactivePrompt = ""
+            )
+        }
+
+        val session = sessionManager.getSession(sessionId) ?: return
+        val lastExecutingItem = session.currentExecutingCommand
+
+        if (lastExecutingItem != null && lastExecutingItem.isExecuting) {
+            lastExecutingItem.setOutput(session.currentCommandOutput.toString().trim())
+            lastExecutingItem.setExecuting(false)
+
+            Log.i(TAG, "Finishing command ${lastExecutingItem.id} for session $sessionId")
+            
+            // 发出命令完成事件
+            onCommandExecutionEvent(CommandExecutionEvent(
+                commandId = lastExecutingItem.id,
+                sessionId = sessionId,
+                outputChunk = "",
+                isCompleted = true
+            ))
+
+            // Clear the reference since command is no longer executing
+            session.currentExecutingCommand = null
+            session.currentCommandOutput.clear()
+            
+            // 通知命令已完成，可以处理下一个队列命令
+            onCommandCompleted(sessionId)
+        }
     }
-    
+
     /**
-     * 移除变化监听器
+     * 检测并处理全屏模式切换
+     * @return 如果处理了全屏模式切换，则返回 true
      */
-    fun removeChangeListener(listener: () -> Unit) {
-        changeListeners.remove(listener)
+    private fun detectFullscreenMode(sessionId: String, buffer: StringBuilder, sessionManager: SessionManager): Boolean {
+        // CSI ? 1049 h: 启用备用屏幕缓冲区（进入全屏模式）
+        // CSI ? 1049 l: 禁用备用屏幕缓冲区（退出全屏模式）
+        val enterFullscreen = "\u001B[?1049h"
+        val exitFullscreen = "\u001B[?1049l"
+
+        val bufferContent = buffer.toString()
+
+        val enterIndex = bufferContent.indexOf(enterFullscreen)
+        val exitIndex = bufferContent.indexOf(exitFullscreen)
+
+        if (enterIndex != -1) {
+            Log.d(TAG, "Entering fullscreen mode for session $sessionId")
+            
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(isFullscreen = true)
+            }
+            
+            // 清空缓冲区，ansiParser 已经包含所有内容
+            buffer.clear()
+            return true
+        }
+
+        if (exitIndex != -1) {
+            Log.d(TAG, "Exiting fullscreen mode for session $sessionId")
+            val outputBeforeExit = bufferContent.substring(0, exitIndex)
+
+            // 更新最后一个命令的输出
+            if (outputBeforeExit.isNotEmpty()) {
+                updateCommandOutput(sessionId, outputBeforeExit, sessionManager)
+            }
+
+            sessionManager.updateSession(sessionId) { session ->
+                session.copy(isFullscreen = false)
+            }
+
+            // 消耗包括退出代码在内的所有内容
+            buffer.delete(0, exitIndex + exitFullscreen.length)
+
+            // 退出全屏后，我们可能需要重新绘制提示符
+            finishCurrentCommand(sessionId, sessionManager)
+            return true
+        }
+        return false
     }
-    
+
     /**
-     * 添加新输出监听器
+     * 发送欢迎消息到 Canvas
+     * 在 READY 状态时清屏，然后显示欢迎消息
      */
-    fun addNewOutputListener(listener: () -> Unit) {
-        newOutputListeners.add(listener)
+    private fun sendWelcomeMessage(sessionId: String, sessionManager: SessionManager) {
+        val session = sessionManager.getSession(sessionId) ?: return
+        
+        // 5 行 x 4 列逐字像素艺术字模，重组为 "onecode"；
+        // one(浅灰 250) + code(橙 208)。使用 U+2588 (█) 画左右竖线与右长竖；
+        // 使用 U+2580 (▀)、U+2584 (▄) 半角方块画横线（高度仅 0.5 cell），
+        // 物理上实现横竖线条粗细 1:1 完全一致，消除"横粗竖细"与"字被拉长"两个痛点。
+        // 总宽 34 列（4×7 + 6），左右两侧自动留出 3-5 列呼吸空白。
+        val glyphs = mapOf(
+            'o' to listOf(
+                " ▀▀ ",
+                "█  █",
+                "█  █",
+                " ▄▄ ",
+                "    "
+            ),
+            'n' to listOf(
+                " ▀▀ ",
+                "█  █",
+                "█  █",
+                "█  █",
+                "    "
+            ),
+            'e' to listOf(
+                " ▀▀ ",
+                "█▀▀█",
+                "█   ",
+                " ▄▄ ",
+                "    "
+            ),
+            'c' to listOf(
+                " ▀▀ ",
+                "█   ",
+                "█   ",
+                " ▄▄ ",
+                "    "
+            ),
+            'd' to listOf(
+                "   █",
+                " ▀▀█",
+                "█  █",
+                " ▄▄█",
+                "    "
+            )
+        )
+        val text = "onecode"
+        val sep = " "
+        val height = 5
+        val ansiRegex = Regex("\u001B\\[[0-9;]*m")
+        // 逐行拼装：每个字符 glyph 套上对应颜色（one 0..2 灰、code 3..6 橙），以单 cell 间隔分隔
+        val artLines = List(height) { row ->
+            val sb = StringBuilder()
+            text.forEachIndexed { i, ch ->
+                if (i > 0) sb.append(sep)
+                val glyph = glyphs[ch]?.get(row) ?: "     "
+                val color = if (i < 3) "\u001B[38;5;250m" else "\u001B[38;5;208m"
+                sb.append(color).append(glyph).append("\u001B[0m")
+            }
+            sb.toString()
+        }
+        // art 实际可见宽度（去除 ANSI 序列后，最长一行字符数）
+        val artWidth = artLines.maxOf { it.replace(ansiRegex, "").length }
+        val screenWidth = session.ansiParser.getScreenWidth()
+        val prefix = if (screenWidth > artWidth) (screenWidth - artWidth) / 2 else 0
+        val pad = " ".repeat(prefix)
+        
+        val sb = StringBuilder("\u001B[2J\u001B[H")
+        for (line in artLines) {
+            sb.append(pad).append(line).append("\r\n")
+        }
+        sb.append("\r\n")
+        sb.append("  >> Your portable Ubuntu environment on Android <<\r\n")
+        
+        // 直接发送到 ANSI 解析器（Canvas 渲染）
+        // 清屏操作会清除之前初始化过程中的所有输出
+        session.ansiParser.parse(sb.toString())
+        
+        Log.d(TAG, "Welcome message sent (sw=$screenWidth, artWidth=$artWidth, prefix=$prefix) for session $sessionId")
     }
-    
-    /**
-     * 移除新输出监听器
-     */
-    fun removeNewOutputListener(listener: () -> Unit) {
-        newOutputListeners.remove(listener)
-    }
-    
-    /**
-     * 通知所有监听器终端内容已改变
-     */
-    private fun notifyChange() {
-        changeListeners.forEach { it() }
-    }
-    
-    /**
-     * 通知新输出监听器
-     */
-    private fun notifyNewOutput() {
-        newOutputListeners.forEach { it() }
-    }
-} 
+
+}
