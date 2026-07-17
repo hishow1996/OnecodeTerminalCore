@@ -22,6 +22,7 @@ import android.os.Looper
 import android.widget.OverScroller
 import android.view.accessibility.AccessibilityManager
 import com.ai.assistance.onecode.terminal.view.domain.ansi.AnsiTerminalEmulator
+import com.ai.assistance.onecode.terminal.view.domain.ansi.RenderState
 import com.ai.assistance.onecode.terminal.view.domain.ansi.TerminalChar
 import kotlin.math.max
 import kotlin.math.min
@@ -265,6 +266,9 @@ class CanvasTerminalView @JvmOverloads constructor(
                     if (!scroller.isFinished) {
                         scroller.abortAnimation()
                     }
+                    // 取消任何挂起的 resize 去抖回调，避免手势期间 80ms 后 commitPendingResize
+                    // 把 scrollOffsetY 用过期比例重算覆盖刚写入的手势偏移，造成抖动。
+                    mainHandler.removeCallbacks(resizeCommitRunnable)
                     
                     scrollOffsetY += distanceY
                     scrollOffsetY = scrollOffsetY.coerceAtLeast(0f)
@@ -289,7 +293,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                 if (!selectionManager.hasSelection()) {
                     // 开始惯性滚动
                     val em = emulator ?: return@GestureHandler
-                    val fullContent = em.getFullContent()
+                    val fullContent = em.getFullContentSnapshot()
                     val charHeight = textMetrics.charHeight
                     val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
                     val maxScrollOffset = max(0f, fullContent.size * charHeight - availH).toInt()
@@ -476,6 +480,9 @@ class CanvasTerminalView @JvmOverloads constructor(
                     if (!scroller.isFinished) {
                         scroller.abortAnimation()
                     }
+                    // 取消任何挂起的 resize 去抖回调，避免手势期间 80ms 后 commitPendingResize
+                    // 把 scrollOffsetY 用过期比例重算覆盖刚写入的手势偏移，造成抖动。
+                    mainHandler.removeCallbacks(resizeCommitRunnable)
                     
                     scrollOffsetY += distanceY
                     scrollOffsetY = scrollOffsetY.coerceAtLeast(0f)
@@ -500,7 +507,7 @@ class CanvasTerminalView @JvmOverloads constructor(
                 if (!selectionManager.hasSelection()) {
                     // 开始惯性滚动
                     val em = emulator ?: return@GestureHandler
-                    val fullContent = em.getFullContent()
+                    val fullContent = em.getFullContentSnapshot()
                     val charHeight = textMetrics.charHeight
                     val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
                     val maxScrollOffset = max(0f, fullContent.size * charHeight - availH).toInt()
@@ -838,10 +845,12 @@ class CanvasTerminalView @JvmOverloads constructor(
                 isDirty = true
             }
         }
-        
-        // 使用完整内容（历史 + 屏幕缓冲）的稳定快照，避免与 IO 线程 parse 写入并发竞争
-        val fullContent = em.getFullContentSnapshot()
-        val historySize = em.getHistorySize()
+        // 用同一把 bufferLock 内取齐的一致快照（内容 + historySize + 光标位置/可见性），
+        // 杜绝 IO 线程 parse 中途 scrollUp/移动光标让 history 与光标行号错位，
+        // 消除 "排版错乱 / 光标与文字不对齐 / 行序被打乱" 的渲染问题。
+        val renderState: RenderState = em.getRenderState()
+        val fullContent = renderState.fullContent
+        val historySize = renderState.historySize
 
         val charWidth = textMetrics.charWidth
         val charHeight = textMetrics.charHeight
@@ -863,10 +872,13 @@ class CanvasTerminalView @JvmOverloads constructor(
         // 前半批行用旧偏移、后半批用新偏移画出"内容显示成两个"的重影。
         val maxScrollOffset = max(0f, fullContent.size * charHeight - availHeightCanvas)
 
-        if (needScrollToBottom) {
+        // 仅在「没有用户手动滚动」时允许自动贴底；否则用户正在上滑查看历史时，
+        // 此处强制置底会把 scrollOffsetY 拉回最大值，与手势回调刚写入的值在每帧之间反复跳变，
+        // 表现为按住屏幕滑动时的明显抖动。
+        if (needScrollToBottom && !isUserScrolling) {
             scrollOffsetY = maxScrollOffset
-            needScrollToBottom = false
         }
+        needScrollToBottom = false
 
         scrollOffsetY = scrollOffsetY.coerceIn(0f, maxScrollOffset)
         val offset = scrollOffsetY
@@ -899,9 +911,10 @@ class CanvasTerminalView @JvmOverloads constructor(
         }
         
         // 绘制光标（光标只在可见屏幕部分显示，需要考虑历史缓冲区偏移）
-        if (em.isCursorVisible() && cursorBlinkOn) {
-            val cursorRow = historySize + em.getCursorY()
-            val cursorCol = em.getCursorX()
+        // 用 renderState 里的一致光标位置/可见性，避免与 historySize 错位
+        if (renderState.cursorVisible && cursorBlinkOn) {
+            val cursorRow = historySize + renderState.cursorY
+            val cursorCol = renderState.cursorX
             
             // 只有当光标在可见区域内时才绘制
             if (cursorRow >= startRow && cursorRow < endRow) {
@@ -1179,7 +1192,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     private fun drawSelection(canvas: Canvas, charWidth: Float, charHeight: Float) {
         val selection = selectionManager.selection?.normalize() ?: return
         val em = emulator ?: return
-        val fullContent = em.getFullContent()
+        val fullContent = em.getFullContentSnapshot()
         val padLeft = config.paddingLeft
         val padTop = config.paddingTop
 
@@ -1240,7 +1253,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     private fun getHandlePositions(): Pair<Pair<Float, Float>, Pair<Float, Float>>? {
         val selection = selectionManager.selection?.normalize() ?: return null
         val em = emulator ?: return null
-        val fullContent = em.getFullContent()
+        val fullContent = em.getFullContentSnapshot()
         val charWidth = textMetrics.charWidth
         val charHeight = textMetrics.charHeight
         val handleRadius = charHeight * 0.4f
@@ -1416,7 +1429,7 @@ class CanvasTerminalView @JvmOverloads constructor(
      */
     private fun screenToTerminalCoords(x: Float, y: Float): Pair<Int, Int> {
         val em = emulator ?: return Pair(0, 0)
-        val fullContent = em.getFullContent()
+        val fullContent = em.getFullContentSnapshot()
         // 触摸坐标含内边距，还原到终端坐标空间
         val tx = x - config.paddingLeft
         val ty = y - config.paddingTop + scrollOffsetY
@@ -1457,7 +1470,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     private fun startTextSelection(x: Float, y: Float) {
         val (row, col) = screenToTerminalCoords(x, y)
         val em = emulator ?: return
-        val content = em.getFullContent()
+        val content = em.getFullContentSnapshot()
         val line = content.getOrNull(row) ?: return
         
         val isWordChar: (Char) -> Boolean = { c -> c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/' }
@@ -1484,7 +1497,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     private fun selectWordAt(x: Float, y: Float) {
         val (row, col) = screenToTerminalCoords(x, y)
         val em = emulator ?: return
-        val content = em.getFullContent()
+        val content = em.getFullContentSnapshot()
         val line = content.getOrNull(row) ?: return
         
         val isWordChar: (Char) -> Boolean = { c -> c.isLetterOrDigit() || c == '_' || c == '-' || c == '.' || c == '/' }
@@ -1562,7 +1575,7 @@ class CanvasTerminalView @JvmOverloads constructor(
      */
     private fun copySelectedText() {
         val selection = selectionManager.selection?.normalize() ?: return
-        val content = emulator?.getFullContent() ?: return
+        val content = emulator?.getFullContentSnapshot() ?: return
         
         val text = buildString {
             for (row in selection.startRow..selection.endRow) {
@@ -1591,7 +1604,7 @@ class CanvasTerminalView @JvmOverloads constructor(
     }
     
     private fun selectAllText() {
-        val content = emulator?.getFullContent() ?: return
+        val content = emulator?.getFullContentSnapshot() ?: return
         if (content.isEmpty()) return
         val lastRow = content.size - 1
         val lastCol = (content[lastRow].size - 1).coerceAtLeast(0)
@@ -1891,10 +1904,12 @@ class CanvasTerminalView @JvmOverloads constructor(
         emulator?.resize(cols, rows)
 
         // 恢复滚动位置（与 drawTerminal 一致，用扣过 padding 的可用高度）
-        if (emulator != null) {
+        // 仅在用户未手动滚动时按比例恢复；否则 resize 重算的 offset 会与手势回调
+        // 刚写入的 scrollOffsetY 在每帧之间互相覆盖，造成按住屏幕滑动时的明显抖动。
+        if (emulator != null && !isUserScrolling) {
             val newCharHeight = textMetrics.charHeight
             val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(newCharHeight)
-            val fullContentSize = emulator?.getFullContent()?.size ?: 0
+            val fullContentSize = (emulator?.getHistorySize() ?: 0) + (emulator?.getScreenHeight() ?: 0)
             val maxScrollOffset = max(0f, fullContentSize * newCharHeight - availH)
             scrollOffsetY = (currentScrollRows * newCharHeight).coerceIn(0f, maxScrollOffset)
         }
