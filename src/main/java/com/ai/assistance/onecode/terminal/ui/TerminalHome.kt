@@ -394,7 +394,7 @@ if (env.isFullscreen) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-.padding(top = if (showTabBar) tabBarHeightDp else 0.dp)
+                            .background(Color.Black)
                             .padding(padding),
                         verticalAlignment = Alignment.CenterVertically
                     ) {

@@ -82,7 +82,9 @@ fun TerminalScreen(
     NavHost(
         navController = navController,
         startDestination = "loading",
-        modifier = Modifier.background(Color.Black)
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
     ) {
         
         composable("loading") {
