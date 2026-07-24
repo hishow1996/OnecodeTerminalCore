@@ -745,8 +745,15 @@ class AnsiTerminalEmulator(
     fun isCursorVisible(): Boolean = cursorVisible
     fun getScreenWidth(): Int = screenWidth
     fun getScreenHeight(): Int = screenHeight
-    
+
     fun getScreenContent(): Array<Array<TerminalChar>> = screenBuffer
+
+    /**
+     * 是否处于备用屏（TUI 全屏模式，如 opencode）。
+     * 备用屏下没有 scrollback 历史，渲染不应包含主屏 historyBuffer，
+     * 否则会把切换前 shell 内容和 TUI 内容拼在一起→重影。
+     */
+    fun isAltScreenActive(): Boolean = isAltScreenActive
     
     /**
      * 获取包含历史记录的完整内容（历史 + 屏幕）
@@ -759,13 +766,25 @@ class AnsiTerminalEmulator(
      * 返回历史+屏幕缓冲的稳定快照（行深拷贝），供渲染线程整帧使用。
      * 在 bufferLock 内拷贝，期间 IO 线程的 parse 写入会被阻塞，保证本帧
      * 不会被半改内容污染、行序不会被增删打乱 → 消除"消息显示成两个/排版乱/闪重影"。
+     *
+     * 备用屏（alt screen，如 opencode 等 TUI）下不返回 historyBuffer，
+     * 因为 TUI 全屏模式没有 scrollback 概念——主屏历史和 TUI 内容拼接
+     * 会导致滚动时看到"重影"（旧 shell 内容 + TUI 内容混合显示）。
      */
     fun getFullContentSnapshot(): List<Array<TerminalChar>> = synchronized(bufferLock) {
-        val total = historyBuffer.size + screenBuffer.size
-        val result = ArrayList<Array<TerminalChar>>(total)
-        for (line in historyBuffer) result.add(line.copyOf())
-        for (line in screenBuffer) result.add(line.copyOf())
-        result
+        if (isAltScreenActive) {
+            // 备用屏：只返回当前屏内容，不含历史
+            val result = ArrayList<Array<TerminalChar>>(screenBuffer.size)
+            for (line in screenBuffer) result.add(line.copyOf())
+            result
+        } else {
+            // 主屏：历史 + 当前屏
+            val total = historyBuffer.size + screenBuffer.size
+            val result = ArrayList<Array<TerminalChar>>(total)
+            for (line in historyBuffer) result.add(line.copyOf())
+            for (line in screenBuffer) result.add(line.copyOf())
+            result
+        }
     }
     
     /**
@@ -785,9 +804,12 @@ class AnsiTerminalEmulator(
     }
     
     /**
-     * 获取历史缓冲区大小
+     * 获取历史缓冲区大小。
+     * 备用屏下返回 0（与 getFullContentSnapshot 一致，不含历史）。
      */
-    fun getHistorySize(): Int = synchronized(bufferLock) { historyBuffer.size }
+    fun getHistorySize(): Int = synchronized(bufferLock) {
+        if (isAltScreenActive) 0 else historyBuffer.size
+    }
     
     fun resize(newWidth: Int, newHeight: Int) = synchronized(bufferLock) {
         if (newWidth == screenWidth && newHeight == screenHeight) return
