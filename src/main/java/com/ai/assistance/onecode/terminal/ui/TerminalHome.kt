@@ -190,15 +190,6 @@ fun TerminalHome(
     var tabBarHeightPx by remember { mutableStateOf(0) }
     val tabBarHeightDp by derivedStateOf { with(density) { tabBarHeightPx.toDp() } }
 
-    // 方案A：标签栏 toggle 时主动 GONE→VISIBLE 重建 SurfaceView，
-    // 解决 SurfaceView punch-hole 在 size 变化时不重同步导致内容空白的回归(b108c914)。
-    LaunchedEffect(showTabBar) {
-        terminalViewRef?.let { view ->
-            view.visibility = View.GONE
-            view.post { view.visibility = View.VISIBLE }
-        }
-    }
-
     // 方案C变体：外层用 Box 而非 Column。终端区域始终 fillMaxSize 整屏，
     // 其 SurfaceView 的 punch-hole 不会因标签栏显隐触发 onSizeChanged 错位。
     // 标签栏作为 Box 第二层叠加浮在顶部（覆盖终端顶部约40dp，不再下推终端），
@@ -618,17 +609,20 @@ private fun SessionTabBar(
                 }
             }
 
-            // 新建会话按钮
-            IconButton(
-                onClick = onNewSession,
-                modifier = Modifier.size(32.dp)
+            // 新建会话按钮 — 用 Box+clickable 替代 IconButton，
+            // 避免 Material3 Surface 语义干扰触摸路由，确保点击可靠触发
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clickable { onNewSession() },
+                contentAlignment = Alignment.Center
             ) {
                 val context = LocalContext.current
                 Icon(
                     imageVector = Icons.Default.Add,
                     contentDescription = context.getString(com.ai.assistance.onecode.terminal.R.string.new_session),
                     tint = Color.White,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }
