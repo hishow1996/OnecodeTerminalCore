@@ -78,6 +78,10 @@ class AnsiTerminalEmulator(
     private var altScreenBuffer: Array<Array<TerminalChar>>? = null
     private var isAltScreenActive = false
     
+    // 鼠标跟踪模式（TUI 应用如 opencode 启用后，滚动手势转发为鼠标滚轮事件）
+    private var mouseTrackingEnabled = false
+    private var sgrMouseMode = false // SGR 鼠标模式（ESC[?1006h）
+    
     // 光标位置
     private var cursorX: Int = 0
     private var cursorY: Int = 0
@@ -458,6 +462,8 @@ class AnsiTerminalEmulator(
                     6 -> originMode = enable // DECOM - 原点模式
                     7 -> autoWrapMode = enable // DECAWM - 自动换行模式
                     25 -> cursorVisible = enable // DECTCEM - 光标可见性
+                    1000 -> mouseTrackingEnabled = enable // X11 鼠标跟踪
+                    1006 -> sgrMouseMode = enable // SGR 鼠标模式
                     1049 -> toggleAltScreen(enable) // 备用屏幕缓冲区
                     2004 -> {} // Bracketed paste mode
                 }
@@ -747,7 +753,44 @@ class AnsiTerminalEmulator(
     fun getScreenHeight(): Int = screenHeight
     
     fun getScreenContent(): Array<Array<TerminalChar>> = screenBuffer
-    
+
+    /**
+     * 是否处于备用屏（TUI 全屏模式，如 opencode）。
+     * 备用屏下没有 scrollback 历史，渲染不应包含主屏 historyBuffer，
+     * 否则会把切换前 shell 内容和 TUI 内容拼在一起→重影。
+     */
+    fun isAltScreenActive(): Boolean = isAltScreenActive
+
+    /**
+     * 鼠标跟踪是否已启用（TUI 应用通过 ESC[?1000h 开启）。
+     * 开启后滚动手势可转发为鼠标滚轮事件。
+     */
+    fun isMouseTrackingEnabled(): Boolean = mouseTrackingEnabled
+
+    /**
+     * 生成鼠标滚轮事件的转义序列。
+     * @param directionUp true=向上滚, false=向下滚
+     * @param row 光标行（0-based）
+     * @param col 光标列（0-based）
+     * @return 转义序列字符串，若鼠标跟踪未启用则返回 null
+     */
+    fun generateMouseWheel(directionUp: Boolean, row: Int, col: Int): String? {
+        if (!mouseTrackingEnabled) return null
+        val button = if (directionUp) 64 else 65
+        val r = (row + 1).coerceAtLeast(1)
+        val c = (col + 1).coerceAtLeast(1)
+        return if (sgrMouseMode) {
+            // SGR 格式: ESC[<button;col;rowM  (1-based)
+            "\u001b[<$button;$c;$rM"
+        } else {
+            // 传统 X11 格式: ESC[M + 3 bytes(button+32, col+32, row+32)
+            val b = (button + 32).coerceAtMost(255).toChar()
+            val x = (c + 31).coerceAtMost(255).toChar()
+            val y = (r + 31).coerceAtMost(255).toChar()
+            "\u001b[M$b$x$y"
+        }
+    }
+
     /**
      * 获取包含历史记录的完整内容（历史 + 屏幕）
      */
@@ -759,13 +802,25 @@ class AnsiTerminalEmulator(
      * 返回历史+屏幕缓冲的稳定快照（行深拷贝），供渲染线程整帧使用。
      * 在 bufferLock 内拷贝，期间 IO 线程的 parse 写入会被阻塞，保证本帧
      * 不会被半改内容污染、行序不会被增删打乱 → 消除"消息显示成两个/排版乱/闪重影"。
+     *
+     * 备用屏(alt screen)模式下，标准终端(xterm等)没有 scrollback 历史，
+     * alt screen 是独立的全屏缓冲区。此时只返回 screenBuffer，
+     * 避免主屏 history 与 TUI 内容拼接导致重影。
      */
     fun getFullContentSnapshot(): List<Array<TerminalChar>> = synchronized(bufferLock) {
-        val total = historyBuffer.size + screenBuffer.size
-        val result = ArrayList<Array<TerminalChar>>(total)
-        for (line in historyBuffer) result.add(line.copyOf())
-        for (line in screenBuffer) result.add(line.copyOf())
-        result
+        if (isAltScreenActive) {
+            // 备用屏：只返回屏幕缓冲，不含历史
+            val result = ArrayList<Array<TerminalChar>>(screenBuffer.size)
+            for (line in screenBuffer) result.add(line.copyOf())
+            result
+        } else {
+            // 主屏：历史 + 当前屏
+            val total = historyBuffer.size + screenBuffer.size
+            val result = ArrayList<Array<TerminalChar>>(total)
+            for (line in historyBuffer) result.add(line.copyOf())
+            for (line in screenBuffer) result.add(line.copyOf())
+            result
+        }
     }
     
     /**
@@ -785,9 +840,12 @@ class AnsiTerminalEmulator(
     }
     
     /**
-     * 获取历史缓冲区大小
+     * 获取历史缓冲区大小。
+     * 备用屏下返回 0（与 getFullContentSnapshot 一致，不含历史）。
      */
-    fun getHistorySize(): Int = synchronized(bufferLock) { historyBuffer.size }
+    fun getHistorySize(): Int = synchronized(bufferLock) {
+        if (isAltScreenActive) 0 else historyBuffer.size
+    }
     
     fun resize(newWidth: Int, newHeight: Int) = synchronized(bufferLock) {
         if (newWidth == screenWidth && newHeight == screenHeight) return

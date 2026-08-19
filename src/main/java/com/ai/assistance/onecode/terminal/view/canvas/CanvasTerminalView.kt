@@ -130,6 +130,10 @@ class CanvasTerminalView @JvmOverloads constructor(
     @Volatile
     private var scrollOffsetY = 0f
     
+    // 鼠标滚轮累加器（alt screen 模式下将滚动手势转换为鼠标滚轮事件）
+    private var mouseWheelAccumulator = 0f
+    private val mouseWheelThreshold = 40f // 每 40px 累积触发一次滚轮事件
+    
     // 惯性滚动处理器
     private val scroller: OverScroller by lazy { OverScroller(context) }
     
@@ -310,6 +314,26 @@ class CanvasTerminalView @JvmOverloads constructor(
             },
             onScroll = { _, distanceY ->
                 if (!selectionManager.hasSelection()) {
+                    val em = emulator
+                    // 备用屏(TUI)模式：将滚动手势转发为鼠标滚轮事件，
+                    // 让 TUI 应用自己处理滚动，而不是滚动终端 scrollback（alt screen 无 scrollback）。
+                    if (em != null && em.isAltScreenActive()) {
+                        mouseWheelAccumulator += distanceY
+                        while (kotlin.math.abs(mouseWheelAccumulator) >= mouseWheelThreshold) {
+                            val directionUp = mouseWheelAccumulator > 0
+                            val wheel = em.generateMouseWheel(directionUp, em.getCursorY(), em.getCursorX())
+                            if (wheel != null) {
+                                inputCallback?.invoke(wheel)
+                            } else {
+                                // 鼠标跟踪未启用：发送方向键作为后备
+                                val arrow = if (directionUp) "\u001b[A" else "\u001b[B"
+                                inputCallback?.invoke(arrow)
+                            }
+                            mouseWheelAccumulator -= if (directionUp) mouseWheelThreshold else -mouseWheelThreshold
+                        }
+                        return@GestureHandler
+                    }
+                    
                     // 手动滚动时停止惯性滚动
                     if (!scroller.isFinished) {
                         scroller.abortAnimation()
@@ -345,6 +369,8 @@ class CanvasTerminalView @JvmOverloads constructor(
                 if (!selectionManager.hasSelection()) {
                     // 开始惯性滚动
                     val em = emulator ?: return@GestureHandler
+                    // 备用屏(TUI)模式：不做惯性滚动，fling 已在 onScroll 中转为滚轮事件
+                    if (em.isAltScreenActive()) return@GestureHandler
                     val fullContent = em.getFullContentSnapshot()
                     val charHeight = textMetrics.charHeight
                     val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
@@ -529,6 +555,26 @@ class CanvasTerminalView @JvmOverloads constructor(
             },
             onScroll = { _, distanceY ->
                 if (!selectionManager.hasSelection()) {
+                    val em = emulator
+                    // 备用屏(TUI)模式：将滚动手势转发为鼠标滚轮事件，
+                    // 让 TUI 应用自己处理滚动，而不是滚动终端 scrollback（alt screen 无 scrollback）。
+                    if (em != null && em.isAltScreenActive()) {
+                        mouseWheelAccumulator += distanceY
+                        while (kotlin.math.abs(mouseWheelAccumulator) >= mouseWheelThreshold) {
+                            val directionUp = mouseWheelAccumulator > 0
+                            val wheel = em.generateMouseWheel(directionUp, em.getCursorY(), em.getCursorX())
+                            if (wheel != null) {
+                                inputCallback?.invoke(wheel)
+                            } else {
+                                // 鼠标跟踪未启用：发送方向键作为后备
+                                val arrow = if (directionUp) "\u001b[A" else "\u001b[B"
+                                inputCallback?.invoke(arrow)
+                            }
+                            mouseWheelAccumulator -= if (directionUp) mouseWheelThreshold else -mouseWheelThreshold
+                        }
+                        return@GestureHandler
+                    }
+                    
                     // 手动滚动时停止惯性滚动
                     if (!scroller.isFinished) {
                         scroller.abortAnimation()
@@ -564,6 +610,8 @@ class CanvasTerminalView @JvmOverloads constructor(
                 if (!selectionManager.hasSelection()) {
                     // 开始惯性滚动
                     val em = emulator ?: return@GestureHandler
+                    // 备用屏(TUI)模式：不做惯性滚动，fling 已在 onScroll 中转为滚轮事件
+                    if (em.isAltScreenActive()) return@GestureHandler
                     val fullContent = em.getFullContentSnapshot()
                     val charHeight = textMetrics.charHeight
                     val availH = (height - config.paddingTop - config.paddingBottom).coerceAtLeast(charHeight)
@@ -984,6 +1032,10 @@ class CanvasTerminalView @JvmOverloads constructor(
                 
                 // 遍历到光标列，累加每个字符的宽度
                 for (col in 0 until cursorCol.coerceAtMost(line.size)) {
+                    // 宽字符占位格(隐藏空格)不贡献水平偏移，
+                    // 其位置已由前一个宽字符的2格宽度覆盖。
+                    // 否则每个宽字符会多算1格宽度→光标离文字太远。
+                    if (line[col].isHidden && line[col].char == ' ') continue
                     val cellWidth = textMetrics.getCellWidth(line[col].char)
                     cursorX += charWidth * cellWidth
                 }
