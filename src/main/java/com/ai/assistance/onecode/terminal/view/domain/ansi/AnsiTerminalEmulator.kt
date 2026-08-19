@@ -781,7 +781,7 @@ class AnsiTerminalEmulator(
         val c = (col + 1).coerceAtLeast(1)
         return if (sgrMouseMode) {
             // SGR 格式: ESC[<button;col;rowM  (1-based)
-            "\u001b[<$button;$c;$rM"
+            "\u001b[<$button;$c;${r}M"
         } else {
             // 传统 X11 格式: ESC[M + 3 bytes(button+32, col+32, row+32)
             val b = (button + 32).coerceAtMost(255).toChar()
