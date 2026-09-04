@@ -1,6 +1,5 @@
 package com.ai.assistance.onecode.terminal.main
 
-import android.content.Context
 import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
@@ -17,7 +16,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -31,21 +29,21 @@ import com.ai.assistance.onecode.terminal.ui.TerminalHomeV2
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun TerminalScreen(env: TerminalEnv) {
-    val context = LocalContext.current
     val navController = rememberNavController()
     var startDestination by remember { mutableStateOf<String?>(null) }
     var navigated by remember { mutableStateOf(false) }
 
-    val manager = remember { TerminalManager.getInstance(context) }
+    val manager = remember { TerminalManager.getInstance(androidx.compose.ui.platform.LocalContext.current) }
     val state by manager.terminalState.collectAsState()
     val ready = state.currentSession?.isInitializing == false
 
     LaunchedEffect(Unit) {
-        val prefs = context.getSharedPreferences("terminal_prefs", Context.MODE_PRIVATE)
-        startDestination = when {
-            env.forceShowSetup -> TerminalRoutes.SETUP_ROUTE
-            prefs.getBoolean("is_first_launch", true) -> TerminalRoutes.SETUP_ROUTE
-            else -> TerminalRoutes.TERMINAL_HOME_ROUTE
+        // The shell is the product. Setup remains available from Settings,
+        // but a fresh launch should land directly in Ubuntu.
+        startDestination = if (env.forceShowSetup) {
+            TerminalRoutes.SETUP_ROUTE
+        } else {
+            TerminalRoutes.TERMINAL_HOME_ROUTE
         }
     }
 
@@ -74,15 +72,11 @@ fun TerminalScreen(env: TerminalEnv) {
         composable(TerminalRoutes.SETUP_ROUTE) {
             SetupScreen(
                 onBack = {
-                    context.getSharedPreferences("terminal_prefs", Context.MODE_PRIVATE)
-                        .edit().putBoolean("is_first_launch", false).apply()
                     navController.navigate(TerminalRoutes.TERMINAL_HOME_ROUTE) {
                         popUpTo(TerminalRoutes.SETUP_ROUTE) { inclusive = true }
                     }
                 },
                 onSetup = { commands ->
-                    context.getSharedPreferences("terminal_prefs", Context.MODE_PRIVATE)
-                        .edit().putBoolean("is_first_launch", false).apply()
                     env.onSetup(commands)
                     navController.navigate(TerminalRoutes.TERMINAL_HOME_ROUTE) {
                         popUpTo(TerminalRoutes.SETUP_ROUTE) { inclusive = true }
