@@ -61,6 +61,9 @@ private val Muted = Color(0xFF8C9698)
 private val TextPrimary = Color(0xFFE6ECEB)
 private val Green = Color(0xFF8CCF7E)
 
+private fun ctrl(code: Int): String = String(charArrayOf(code.toChar()))
+private const val ESC = "\u001B"
+
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun TerminalHomeV2(
@@ -81,19 +84,8 @@ fun TerminalHomeV2(
         env.sessions.firstOrNull { it.id == env.currentSessionId }?.pty
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(ShellBlack)
-            .imePadding()
-    ) {
-        TopBar(
-            env = env,
-            sessionTitle = currentSession?.title?.ifBlank { "Ubuntu" } ?: "Ubuntu",
-            onNewSession = env::onNewSession,
-            onSettings = onNavigateToSettings
-        )
-
+    Column(Modifier.fillMaxSize().background(ShellBlack).imePadding()) {
+        TopBar(env, currentSession?.title?.ifBlank { "Ubuntu" } ?: "Ubuntu", env::onNewSession, onNavigateToSettings)
         CanvasTerminalScreen(
             emulator = env.terminalEmulator,
             modifier = Modifier.weight(1f),
@@ -104,215 +96,84 @@ fun TerminalHomeV2(
             onScrollOffsetChanged = { id, offset -> env.saveScrollOffset(id, offset) },
             getScrollOffset = { id -> env.getScrollOffset(id) }
         )
-
-        QuickBar(
-            onCommand = { command -> env.onSendInput(command, true) },
-            onInterrupt = env::onInterrupt
-        )
-
+        QuickBar(onInput = { env.onSendInput(it, false) }, onCommand = { env.onSendInput(it, true) }, onInterrupt = env::onInterrupt)
         CommandBar(
             command = env.command,
             prompt = env.currentDirectory.ifEmpty { "~" },
             onCommandChange = env::onCommandChange,
-            onSend = {
-                env.onSendInput(env.command, true)
-                keyboard?.hide()
-            },
-            onKeyboard = {
-                focusRequester.requestFocus()
-                keyboard?.show()
-            },
+            onSend = { env.onSendInput(env.command, true); keyboard?.hide() },
+            onKeyboard = { focusRequester.requestFocus(); keyboard?.show() },
             focusRequester = focusRequester
         )
     }
 }
 
 @Composable
-private fun TopBar(
-    env: TerminalEnv,
-    sessionTitle: String,
-    onNewSession: () -> Unit,
-    onSettings: () -> Unit
-) {
-    Column(modifier = Modifier.background(BarBlack)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .padding(horizontal = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "ubuntu",
-                    color = TextPrimary,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 15.sp
-                )
-                Text(
-                    text = sessionTitle,
-                    color = Muted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    maxLines = 1
-                )
+private fun TopBar(env: TerminalEnv, sessionTitle: String, onNewSession: () -> Unit, onSettings: () -> Unit) {
+    Column(Modifier.background(BarBlack)) {
+        Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("ubuntu", color = TextPrimary, fontFamily = FontFamily.Monospace, fontSize = 15.sp)
+                Text(sessionTitle, color = Muted, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1)
             }
-            Box(
-                modifier = Modifier
-                    .size(7.dp)
-                    .background(Green, RoundedCornerShape(50))
-            )
+            Box(Modifier.size(7.dp).background(Green, RoundedCornerShape(50)))
             Spacer(Modifier.width(7.dp))
-            IconButton(onClick = onNewSession, modifier = Modifier.size(38.dp)) {
-                Icon(Icons.Default.Add, contentDescription = "New session", tint = TextPrimary)
-            }
-            IconButton(onClick = onSettings, modifier = Modifier.size(38.dp)) {
-                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Muted)
-            }
+            IconButton(onClick = onNewSession, modifier = Modifier.size(38.dp)) { Icon(Icons.Default.Add, "New session", tint = TextPrimary) }
+            IconButton(onClick = onSettings, modifier = Modifier.size(38.dp)) { Icon(Icons.Default.Settings, "Settings", tint = Muted) }
         }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             env.sessions.forEach { session ->
-                val selected = session.id == env.currentSessionId
-                SessionChip(
-                    title = session.title.ifBlank { "Ubuntu" },
-                    selected = selected,
-                    canClose = env.sessions.size > 1,
-                    onClick = { env.onSwitchSession(session.id) },
-                    onClose = { env.onCloseSession(session.id) }
-                )
+                SessionChip(session.title.ifBlank { "Ubuntu" }, session.id == env.currentSessionId, env.sessions.size > 1, { env.onSwitchSession(session.id) }, { env.onCloseSession(session.id) })
             }
         }
     }
 }
 
 @Composable
-private fun SessionChip(
-    title: String,
-    selected: Boolean,
-    canClose: Boolean,
-    onClick: () -> Unit,
-    onClose: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .background(if (selected) Selected else BarBlack, RoundedCornerShape(7.dp))
-            .clickable(onClick = onClick)
-            .padding(start = 11.dp, end = if (canClose) 3.dp else 11.dp, top = 7.dp, bottom = 7.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+private fun SessionChip(title: String, selected: Boolean, canClose: Boolean, onClick: () -> Unit, onClose: () -> Unit) {
+    Row(Modifier.background(if (selected) Selected else BarBlack, RoundedCornerShape(7.dp)).clickable(onClick = onClick).padding(start = 11.dp, end = if (canClose) 3.dp else 11.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, color = if (selected) TextPrimary else Muted, fontSize = 12.sp)
-        if (canClose) {
-            IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Close", tint = Muted, modifier = Modifier.size(15.dp))
-            }
-        }
+        if (canClose) IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) { Icon(Icons.Default.Close, "Close", tint = Muted, modifier = Modifier.size(15.dp)) }
     }
 }
 
 @Composable
-private fun QuickBar(onCommand: (String) -> Unit, onInterrupt: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(BarBlack)
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 9.dp, vertical = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp)
-    ) {
-        QuickKey("ls", onClick = { onCommand("ls -la") })
-        QuickKey("pwd", onClick = { onCommand("pwd") })
-        QuickKey("top", onClick = { onCommand("top") })
-        QuickKey("clear", onClick = { onCommand("clear") })
-        QuickKey("Ctrl+C", onClick = onInterrupt)
-        QuickKey("Home", onClick = { onCommand("cd ~") })
+private fun QuickBar(onInput: (String) -> Unit, onCommand: (String) -> Unit, onInterrupt: () -> Unit) {
+    Row(Modifier.fillMaxWidth().background(BarBlack).horizontalScroll(rememberScrollState()).padding(horizontal = 9.dp, vertical = 7.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+        QuickKey("Ctrl+C", onInterrupt)
+        QuickKey("Ctrl+D") { onInput(ctrl(4)) }
+        QuickKey("Ctrl+L") { onInput(ctrl(12)) }
+        QuickKey("Ctrl+A") { onInput(ctrl(1)) }
+        QuickKey("Ctrl+E") { onInput(ctrl(5)) }
+        QuickKey("Ctrl+U") { onInput(ctrl(21)) }
+        QuickKey("Ctrl+K") { onInput(ctrl(11)) }
+        QuickKey("Ctrl+W") { onInput(ctrl(23)) }
+        QuickKey("↑") { onInput(ESC + "[A") }
+        QuickKey("↓") { onInput(ESC + "[B") }
+        QuickKey("Tab") { onInput("\t") }
+        QuickKey("ls") { onCommand("ls -la") }
+        QuickKey("pwd") { onCommand("pwd") }
+        QuickKey("top") { onCommand("top") }
+        QuickKey("clear") { onCommand("clear") }
+        QuickKey("Home") { onCommand("cd ~") }
     }
 }
 
 @Composable
 private fun QuickKey(label: String, onClick: () -> Unit) {
-    Text(
-        text = label,
-        color = Color(0xFFC3CCCD),
-        fontFamily = FontFamily.Monospace,
-        fontSize = 11.sp,
-        modifier = Modifier
-            .background(KeyBlack, RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 7.dp)
-    )
+    Text(label, color = Color(0xFFC3CCCD), fontFamily = FontFamily.Monospace, fontSize = 11.sp, modifier = Modifier.background(KeyBlack, RoundedCornerShape(6.dp)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 7.dp))
 }
 
 @Composable
-private fun CommandBar(
-    command: String,
-    prompt: String,
-    onCommandChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onKeyboard: () -> Unit,
-    focusRequester: FocusRequester
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(ShellBlack)
-            .padding(horizontal = 10.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = "›",
-            color = Green,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 19.sp
-        )
+private fun CommandBar(command: String, prompt: String, onCommandChange: (String) -> Unit, onSend: () -> Unit, onKeyboard: () -> Unit, focusRequester: FocusRequester) {
+    Row(Modifier.fillMaxWidth().background(ShellBlack).padding(horizontal = 10.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("›", color = Green, fontFamily = FontFamily.Monospace, fontSize = 19.sp)
         Spacer(Modifier.width(6.dp))
-        Text(
-            text = prompt.takeLast(24),
-            color = Muted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            maxLines = 1
-        )
+        Text(prompt.takeLast(24), color = Muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp, maxLines = 1)
         Spacer(Modifier.width(7.dp))
-        BasicTextField(
-            value = command,
-            onValueChange = onCommandChange,
-            modifier = Modifier
-                .weight(1f)
-                .focusRequester(focusRequester),
-            singleLine = true,
-            textStyle = TextStyle(
-                color = SyntaxColors.commandDefault,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp
-            ),
-            cursorBrush = SolidColor(Green),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onSend() })
-        )
+        BasicTextField(value = command, onValueChange = onCommandChange, modifier = Modifier.weight(1f).focusRequester(focusRequester), singleLine = true, textStyle = TextStyle(color = SyntaxColors.commandDefault, fontFamily = FontFamily.Monospace, fontSize = 13.sp), cursorBrush = SolidColor(Green), keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { onSend() }))
         Spacer(Modifier.width(8.dp))
-        Text(
-            text = "⌨",
-            color = Muted,
-            fontSize = 17.sp,
-            modifier = Modifier
-                .clickable(onClick = onKeyboard)
-                .padding(5.dp)
-        )
-        Text(
-            text = "↵",
-            color = Green,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 17.sp,
-            modifier = Modifier
-                .clickable(onClick = onSend)
-                .padding(start = 8.dp, end = 3.dp, top = 5.dp, bottom = 5.dp)
-        )
+        Text("⌨", color = Muted, fontSize = 17.sp, modifier = Modifier.clickable(onClick = onKeyboard).padding(5.dp))
+        Text("↵", color = Green, fontFamily = FontFamily.Monospace, fontSize = 17.sp, modifier = Modifier.clickable(onClick = onSend).padding(start = 8.dp, end = 3.dp, top = 5.dp, bottom = 5.dp))
     }
 }
