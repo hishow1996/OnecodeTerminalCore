@@ -1,8 +1,6 @@
 package com.ai.assistance.onecode.terminal.ui
 
-import android.content.Context
 import android.os.Build
-import android.view.inputmethod.InputMethodManager
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -39,26 +37,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ai.assistance.onecode.terminal.TerminalEnv
+import com.ai.assistance.onecode.terminal.utils.TerminalFontConfigManager
 import com.ai.assistance.onecode.terminal.view.SyntaxColors
 import com.ai.assistance.onecode.terminal.view.canvas.CanvasTerminalScreen
-import com.ai.assistance.onecode.terminal.utils.TerminalFontConfigManager
 
 private val ShellBlack = Color(0xFF0B0D0E)
 private val BarBlack = Color(0xFF101314)
-private val Border = Color(0xFF242829)
+private val KeyBlack = Color(0xFF171B1C)
+private val Selected = Color(0xFF1A1F20)
 private val Muted = Color(0xFF8C9698)
+private val TextPrimary = Color(0xFFE6ECEB)
 private val Green = Color(0xFF8CCF7E)
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -76,6 +76,7 @@ fun TerminalHomeV2(
 
     LaunchedEffect(Unit) { fontConfig = fontConfigManager.loadRenderConfig() }
 
+    val currentSession = env.sessions.firstOrNull { it.id == env.currentSessionId }
     val currentPty = remember(env.currentSessionId, env.sessions) {
         env.sessions.firstOrNull { it.id == env.currentSessionId }?.pty
     }
@@ -88,6 +89,7 @@ fun TerminalHomeV2(
     ) {
         TopBar(
             env = env,
+            sessionTitle = currentSession?.title?.ifBlank { "Ubuntu" } ?: "Ubuntu",
             onNewSession = env::onNewSession,
             onSettings = onNavigateToSettings
         )
@@ -104,9 +106,7 @@ fun TerminalHomeV2(
         )
 
         QuickBar(
-            onCommand = { command ->
-                env.onSendInput(command, true)
-            },
+            onCommand = { command -> env.onSendInput(command, true) },
             onInterrupt = env::onInterrupt
         )
 
@@ -130,6 +130,7 @@ fun TerminalHomeV2(
 @Composable
 private fun TopBar(
     env: TerminalEnv,
+    sessionTitle: String,
     onNewSession: () -> Unit,
     onSettings: () -> Unit
 ) {
@@ -141,17 +142,29 @@ private fun TopBar(
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "ubuntu",
-                color = Color.White,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 15.sp
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "ubuntu",
+                    color = TextPrimary,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 15.sp
+                )
+                Text(
+                    text = sessionTitle,
+                    color = Muted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(Green, RoundedCornerShape(50))
             )
-            Spacer(Modifier.width(10.dp))
-            Text("•", color = Green, fontSize = 14.sp)
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(7.dp))
             IconButton(onClick = onNewSession, modifier = Modifier.size(38.dp)) {
-                Icon(Icons.Default.Add, contentDescription = "New session", tint = Color.White)
+                Icon(Icons.Default.Add, contentDescription = "New session", tint = TextPrimary)
             }
             IconButton(onClick = onSettings, modifier = Modifier.size(38.dp)) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Muted)
@@ -189,12 +202,12 @@ private fun SessionChip(
 ) {
     Row(
         modifier = Modifier
-            .background(if (selected) Color(0xFF1A1F20) else BarBlack, RoundedCornerShape(7.dp))
+            .background(if (selected) Selected else BarBlack, RoundedCornerShape(7.dp))
             .clickable(onClick = onClick)
             .padding(start = 11.dp, end = if (canClose) 3.dp else 11.dp, top = 7.dp, bottom = 7.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(title, color = if (selected) Color.White else Muted, fontSize = 12.sp)
+        Text(title, color = if (selected) TextPrimary else Muted, fontSize = 12.sp)
         if (canClose) {
             IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
                 Icon(Icons.Default.Close, contentDescription = "Close", tint = Muted, modifier = Modifier.size(15.dp))
@@ -209,6 +222,7 @@ private fun QuickBar(onCommand: (String) -> Unit, onInterrupt: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .background(BarBlack)
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 9.dp, vertical = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(7.dp)
     ) {
@@ -217,6 +231,7 @@ private fun QuickBar(onCommand: (String) -> Unit, onInterrupt: () -> Unit) {
         QuickKey("top", onClick = { onCommand("top") })
         QuickKey("clear", onClick = { onCommand("clear") })
         QuickKey("Ctrl+C", onClick = onInterrupt)
+        QuickKey("Home", onClick = { onCommand("cd ~") })
     }
 }
 
@@ -228,7 +243,7 @@ private fun QuickKey(label: String, onClick: () -> Unit) {
         fontFamily = FontFamily.Monospace,
         fontSize = 11.sp,
         modifier = Modifier
-            .background(Color(0xFF171B1C), RoundedCornerShape(6.dp))
+            .background(KeyBlack, RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 7.dp)
     )
